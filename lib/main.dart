@@ -436,24 +436,15 @@ class _SearchPageState extends State<SearchPage> {
         ),
         const SizedBox(height: 20),
 
-        if (!showResults) ...[
-          Text('POPULAIRE CLUBS', style: VTextStyles.smallLabel),
-          const SizedBox(height: 10),
-          ...StaticData.clubs
-              .take(5)
-              .map(
-                (c) => VSearchItemClub(
-                  name: c.name,
-                  clubCode: c.code,
-                  onTap: () => Navigator.push(
-                    context,
-                    MaterialPageRoute(builder: (_) => ClubDetailPage(club: c)),
-                  ),
-                ),
-              ),
-        ] else if (_isLoading) ...[
+        if (_isLoading) ...[
           const SizedBox(height: 60),
           const Center(child: CircularProgressIndicator(color: accentYellow)),
+        ] else if (_query == '') ...[
+          VEmptyState(
+            icon: Icons.search,
+            title: 'Zoek clubs of teams',
+            subtitle: 'Type iets om te beginnen (bv: Mendo)',
+          ),
         ] else ...[
           if (_apiClubs.isNotEmpty) ...[
             Text('CLUBS (${_apiClubs.length})', style: VTextStyles.smallLabel),
@@ -859,14 +850,16 @@ class ClubDetailPage extends StatefulWidget {
 
 class _ClubDetailPageState extends State<ClubDetailPage> {
   bool _isCompetitionTab = true;
+  late Future<ClubModel> _clubFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    _clubFuture = widget.club.load();
+  }
 
   @override
   Widget build(BuildContext context) {
-    final club = widget.club;
-    final compTeams = StaticData.clubCompTeams[club.name] ?? [];
-    final cupTeams = StaticData.clubCupTeams[club.name] ?? [];
-    final teamsToShow = _isCompetitionTab ? compTeams : cupTeams;
-
     return Scaffold(
       backgroundColor: primary,
       appBar: AppBar(
@@ -883,83 +876,124 @@ class _ClubDetailPageState extends State<ClubDetailPage> {
             child: const Icon(Icons.chevron_left, color: light, size: 16),
           ),
         ),
-        title: Text(
-          club.name,
-          style: VTextStyles.h3,
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
+        title: FutureBuilder(
+          future: _clubFuture,
+          builder: (context, snapshot) {
+            if (!snapshot.hasData) {
+              return const Text(
+                "Loading...",
+                style: VTextStyles.h3,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              );
+            } else {
+              return Text(
+                snapshot.data!.name,
+                style: VTextStyles.h3,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              );
+            }
+          },
         ),
       ),
-      body: ListView(
-        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
-        children: [
-          // Info grid
-          Row(
+
+      body: FutureBuilder<ClubModel>(
+        future: widget.club.load(),
+        builder: (context, snapshot) {
+          if (!snapshot.hasData) {
+            return const Center(child: CircularProgressIndicator());
+          }
+
+          final club = snapshot.data!;
+
+          final compTeams = club.compTeams;
+          final cupTeams = club.cupTeams;
+
+          final teamsToShow = _isCompetitionTab ? compTeams : cupTeams;
+
+          return ListView(
+            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
             children: [
-              Expanded(
-                child: VInfoCard(
-                  label: 'Voorzitter',
-                  value: club.chairman,
-                  icon: Icons.person_outline,
-                ),
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: VInfoCard(
-                  label: 'Secretaris',
-                  value: club.secretary,
-                  icon: Icons.edit_outlined,
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          VInfoCard(
-            label: 'Website',
-            value: club.website,
-            icon: Icons.language,
-          ),
-          const SizedBox(height: 20),
-
-          // Toggle
-          VToggleTabs(
-            leftLabel: 'Competitie',
-            rightLabel: 'Beker',
-            leftCount: compTeams.length,
-            rightCount: cupTeams.length,
-            isLeftActive: _isCompetitionTab,
-            onLeftTap: () => setState(() => _isCompetitionTab = true),
-            onRightTap: () => setState(() => _isCompetitionTab = false),
-          ),
-          const SizedBox(height: 16),
-
-          // Teams lijst
-          ...teamsToShow.map(
-            (t) => Padding(
-              padding: const EdgeInsets.only(bottom: 8),
-              child: VClubTeamRow(
-                teamName: t['team'],
-                seriesLabel: t['series'],
-                ranking: t['ranking'],
-                nextMatch: t['next_match'],
-                isFavorite: t['is_fav'] == true,
-                onTap: () => Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (_) => TeamDetailPage(
-                      teamName: t['team'],
-                      leagueName: t['series'],
+              // INFO CARDS
+              Row(
+                children: [
+                  Expanded(
+                    child: VInfoCard(
+                      label: 'Voorzitter',
+                      value: club.chairman,
+                      icon: Icons.person_outline,
                     ),
                   ),
-                ),
-                onFavoriteTap: () => VToastOverlay.show(
-                  context,
-                  t['is_fav'] == true ? 'Verwijderd' : 'Toegevoegd',
-                ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: VInfoCard(
+                      label: 'Secretaris',
+                      value: club.secretary,
+                      icon: Icons.edit_outlined,
+                    ),
+                  ),
+                ],
               ),
-            ),
-          ),
-        ],
+
+              const SizedBox(height: 8),
+
+              VInfoCard(
+                label: 'Website',
+                value: club.website,
+                icon: Icons.language,
+              ),
+
+              const SizedBox(height: 20),
+
+              // TOGGLE
+              VToggleTabs(
+                leftLabel: 'Competitie',
+                rightLabel: 'Beker',
+                leftCount: compTeams.length,
+                rightCount: cupTeams.length,
+                isLeftActive: _isCompetitionTab,
+                onLeftTap: () => setState(() => _isCompetitionTab = true),
+                onRightTap: () => setState(() => _isCompetitionTab = false),
+              ),
+
+              const SizedBox(height: 16),
+
+              // LIST
+              ...teamsToShow.map((t) {
+                final team = t['team'] ?? '';
+                final series = t['series'] ?? '';
+                final ranking = t['ranking'] ?? '';
+                final nextMatch = t['next_match'] ?? '';
+                final isFav = t['is_fav'] == true;
+
+                return Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: VClubTeamRow(
+                    teamName: team,
+                    seriesLabel: series,
+                    ranking: ranking,
+                    nextMatch: nextMatch,
+                    isFavorite: isFav,
+                    onTap: () => Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) =>
+                            TeamDetailPage(teamName: team, leagueName: series),
+                      ),
+                    ),
+                    onFavoriteTap: () {
+                      VToastOverlay.show(
+                        context,
+                        isFav ? 'Verwijderd' : 'Toegevoegd',
+                      );
+                    },
+                  ),
+                );
+              }),
+            ],
+          );
+        },
       ),
     );
   }
@@ -1100,32 +1134,68 @@ class TeamDetailPage extends StatelessWidget {
 // ============================================================
 // STATISCHE DATA MODELLEN
 // ============================================================
+// TODO: Marker
 class ClubModel {
   final String name;
   final String code;
+  final String label;
   final String chairman;
   final String secretary;
   final String website;
   final String clubId;
 
+  // FIXME
+  // Temporary raw structures (intentional step before TeamModel)
+  final List<Map<String, dynamic>> compTeams;
+  final List<Map<String, dynamic>> cupTeams;
+
   const ClubModel({
-    required this.name,
-    required this.code,
-    required this.chairman,
-    required this.secretary,
-    required this.website,
-    this.clubId = '',
+    required this.label,
+    required this.clubId,
+    this.name = '',
+    this.chairman = '',
+    this.secretary = '',
+    this.website = '',
+    this.code = '',
+    this.compTeams = const [],
+    this.cupTeams = const [],
   });
 
   factory ClubModel.fromJson(Map<String, dynamic> json) {
+    final general = json['general'] as Map<String, dynamic>? ?? {};
+
     return ClubModel(
       name: json['name'] ?? '',
       code: json['club_code'] ?? '',
+      label: json['label'] ?? '',
       clubId: json['club_id']?.toString() ?? '',
-      chairman: '',
-      secretary: '',
-      website: '',
+
+      chairman: general['Voorzitter']?.toString() ?? '',
+      secretary: general['Secretaris']?.toString() ?? '',
+      website: general['Website']?.toString() ?? '',
+
+      compTeams: (json['competition_teams'] as List<dynamic>? ?? [])
+          .cast<Map<String, dynamic>>(),
+
+      cupTeams: (json['cup_teams'] as List<dynamic>? ?? [])
+          .cast<Map<String, dynamic>>(),
     );
+  }
+
+  Future<ClubModel> load() async {
+    dynamic data;
+    final uri = Uri.parse(
+      'https://volleyapi.sqnder.dev/api/get/club?club_label=$label&club_id=$clubId',
+    );
+    final response = await http.get(uri).timeout(const Duration(seconds: 5));
+
+    if (response.statusCode == 200) {
+      data = jsonDecode(response.body);
+    } else {
+      debugPrint('API Error: ${response.statusCode} - ${response.body}');
+      throw Exception('API Error: ${response.statusCode} - ${response.body}');
+    }
+    return ClubModel.fromJson(data);
   }
 }
 
@@ -1182,43 +1252,21 @@ class FavoriteTeamModel {
 }
 
 class StaticData {
-  static final List<ClubModel> clubs = const [
-    ClubModel(
-      name: 'Kreg Rotselaar',
-      code: 'VB-1849',
-      chairman: 'Tom Van der Auwera',
-      secretary: 'Liesbeth Peeters',
-      website: 'kregrotselaar.be',
-    ),
-    ClubModel(
-      name: 'Mendo Booischot',
-      code: 'AH-1260',
-      chairman: 'Jelle Verelst',
-      secretary: 'Joris De Smet',
-      website: 'mendo.be',
-    ),
-    ClubModel(
-      name: 'VC Lennik',
-      code: 'VB-0234',
-      chairman: 'Jan De Smedt',
-      secretary: 'An Vanhaecke',
-      website: 'vclennik.be',
-    ),
-    ClubModel(
-      name: 'Volley Haasrode',
-      code: 'VB-0891',
-      chairman: 'Pieter Janssens',
-      secretary: 'Lien Maes',
-      website: 'volleyhaasrode.be',
-    ),
-    ClubModel(
-      name: 'VBT Machelen',
-      code: 'VB-0567',
-      chairman: 'Mark De Clercq',
-      secretary: 'Sarah Goossens',
-      website: 'vbtmachelen.be',
-    ),
-  ];
+  static final kregConstruct = ClubModel(
+    label: 'VB-1849 Kreg Rotselaar',
+    clubId: '11136',
+  );
+
+  static final mendoConstruct = ClubModel(
+    label: 'AH-1260 Mendo Booischot"',
+    clubId: '10911',
+  );
+
+  Future<List<ClubModel>> getClubs() async {
+    final kreg = await kregConstruct.load();
+    final mendo = await mendoConstruct.load();
+    return [kreg, mendo];
+  }
 
   static final List<SearchTeamModel> searchTeams = const [
     SearchTeamModel(
