@@ -1,9 +1,7 @@
 import 'package:flutter/material.dart';
 import 'colors.dart';
-import 'league_badge.dart';
 import 'text_styles.dart';
 import 'match_card.dart';
-import 'stat_card.dart';
 import 'search_item_club.dart';
 import 'search_item_team.dart';
 import 'favorite_team_card.dart';
@@ -22,6 +20,18 @@ import 'dart:async';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
 
+// FIXME replace apiBaseUrl with https://volleyapi.sqnder.dev/
+const String apiBaseUrl = "http://192.168.1.43:8000/";
+
+// ============================================================
+// CACHE
+// ============================================================
+final Map<String, ClubModel> _clubCache = {};
+final Map<String, TeamModel> _teamCache = {};
+
+// ============================================================
+// Main
+// ============================================================
 void main() {
   runApp(const VolleyStatsApp());
 }
@@ -247,15 +257,15 @@ class _HomePageState extends State<HomePage> {
             time: m['match_time'],
             isFavTeamHome: m['is_fav_home'] == true,
             showFavBorder: true,
-            onTap: () => Navigator.push(
-              context,
-              MaterialPageRoute(
-                builder: (_) => TeamDetailPage(
-                  teamName: m['fav_name'],
-                  leagueName: m['league_name'],
-                ),
-              ),
-            ),
+            // onTap: () => Navigator.push(
+            //   context,
+            //   MaterialPageRoute(
+            //     builder: (_) => TeamDetailPage(
+            //       teamName: m['fav_name'],
+            //       leagueName: m['league_name'],
+            //     ),
+            //   ),
+            // ),
           ),
         );
         widgets.add(const SizedBox(height: 8));
@@ -305,7 +315,7 @@ class _SearchPageState extends State<SearchPage> {
   bool _isLoading = false;
   bool _hasSearched = false;
   List<ClubModel> _apiClubs = [];
-  List<SearchTeamModel> _apiTeams = [];
+  List<TeamModel> _apiTeams = [];
 
   @override
   void dispose() {
@@ -338,7 +348,7 @@ class _SearchPageState extends State<SearchPage> {
 
     try {
       final uri = Uri.parse(
-        'https://volleyapi.sqnder.dev/api/search?q=${Uri.encodeComponent(query)}',
+        '${apiBaseUrl}api/search?q=${Uri.encodeComponent(query)}',
       );
       final response = await http.get(uri).timeout(const Duration(seconds: 5));
 
@@ -356,9 +366,7 @@ class _SearchPageState extends State<SearchPage> {
               [];
           _apiTeams =
               teamsJson
-                  ?.map(
-                    (t) => SearchTeamModel.fromJson(t as Map<String, dynamic>),
-                  )
+                  ?.map((t) => TeamModel.fromJson(t as Map<String, dynamic>))
                   .toList() ??
               [];
           _isLoading = false;
@@ -472,10 +480,8 @@ class _SearchPageState extends State<SearchPage> {
                 onTap: () => Navigator.push(
                   context,
                   MaterialPageRoute(
-                    builder: (_) => TeamDetailPage(
-                      teamName: t.name,
-                      leagueName: t.leagueName,
-                    ),
+                    builder: (_) =>
+                        TeamDetailPage(team: t, preLoadName: t.name),
                   ),
                 ),
                 onFavoriteTap: () => VToastOverlay.show(
@@ -643,15 +649,16 @@ class FavoritesPage extends StatelessWidget {
               nextDateMonth: f.nextMonth,
               nextTime: f.nextTime,
               hasUpcomingMatch: f.nextHome != null,
-              onTap: () => Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (_) => TeamDetailPage(
-                    teamName: f.name,
-                    leagueName: f.leagueName,
-                  ),
-                ),
-              ),
+              // TODO: Complete on tap and favorite teams.
+              // onTap: () => Navigator.push(
+              //   context,
+              //   MaterialPageRoute(
+              //     builder: (_) => TeamDetailPage(
+              //       teamName: f.name,
+              //       leagueName: f.leagueName,
+              //     ),
+              //   ),
+              // ),
               onRemoveTap: () =>
                   VToastOverlay.show(context, 'Verwijderd uit favorieten'),
             ),
@@ -851,6 +858,7 @@ class ClubDetailPage extends StatefulWidget {
 class _ClubDetailPageState extends State<ClubDetailPage> {
   bool _isCompetitionTab = true;
   late Future<ClubModel> _clubFuture;
+  final Map<String, TeamModel> _loadedTeams = {};
 
   @override
   void initState() {
@@ -879,27 +887,39 @@ class _ClubDetailPageState extends State<ClubDetailPage> {
         title: FutureBuilder(
           future: _clubFuture,
           builder: (context, snapshot) {
-            if (!snapshot.hasData) {
+            if (snapshot.connectionState == ConnectionState.waiting) {
               return const Text(
                 "Loading...",
                 style: VTextStyles.h3,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
               );
-            } else {
-              return Text(
-                snapshot.data!.name,
-                style: VTextStyles.h3,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-              );
             }
+
+            if (snapshot.hasError) {
+              debugPrint("CLUB FUTURE ERROR: ${snapshot.error}");
+              debugPrintStack(stackTrace: snapshot.stackTrace);
+              return const Text("Error", style: VTextStyles.h3);
+            }
+
+            final club = snapshot.data;
+
+            if (club == null) {
+              return const Text("No data", style: VTextStyles.h3);
+            }
+
+            return Text(
+              club.name,
+              style: VTextStyles.h3,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            );
           },
         ),
       ),
 
       body: FutureBuilder<ClubModel>(
-        future: widget.club.load(),
+        future: _clubFuture,
         builder: (context, snapshot) {
           if (!snapshot.hasData) {
             return const Center(child: CircularProgressIndicator());
@@ -960,35 +980,60 @@ class _ClubDetailPageState extends State<ClubDetailPage> {
               const SizedBox(height: 16),
 
               // LIST
-              ...teamsToShow.map((t) {
-                final team = t['team'] ?? '';
-                final series = t['series'] ?? '';
-                final ranking = t['ranking'] ?? '';
-                final nextMatch = t['next_match'] ?? '';
-                final isFav = t['is_fav'] == true;
+              ...teamsToShow.map((team) {
+                final cachedTeam = _loadedTeams[team.teamId];
 
-                return Padding(
-                  padding: const EdgeInsets.only(bottom: 8),
-                  child: VClubTeamRow(
-                    teamName: team,
-                    seriesLabel: series,
-                    ranking: ranking,
-                    nextMatch: nextMatch,
-                    isFavorite: isFav,
-                    onTap: () => Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (_) =>
-                            TeamDetailPage(teamName: team, leagueName: series),
-                      ),
-                    ),
-                    onFavoriteTap: () {
-                      VToastOverlay.show(
-                        context,
-                        isFav ? 'Verwijderd' : 'Toegevoegd',
+                return FutureBuilder<TeamModel>(
+                  key: ValueKey('${_isCompetitionTab}_${team.teamId}'),
+                  future: cachedTeam != null
+                      ? Future.value(cachedTeam)
+                      : team.load().then((loaded) {
+                          _loadedTeams[loaded.teamId] = loaded;
+                          return loaded;
+                        }),
+                  builder: (context, snapshot) {
+                    if (!snapshot.hasData) {
+                      return const Padding(
+                        padding: EdgeInsets.only(bottom: 8),
+                        child: VClubTeamRow.loading(),
                       );
-                    },
-                  ),
+                    }
+
+                    final team = snapshot.data!;
+                    var nextMatchString = "Geen volgende wedstrijd";
+                    if (team.games.isNotEmpty) {
+                      final nextMatch = team.games.first;
+                      nextMatchString =
+                          "${nextMatch.date} ${nextMatch.time} "
+                          "${nextMatch.homeTeam.name} - "
+                          "${nextMatch.awayTeam.name}";
+                    }
+
+                    return Padding(
+                      padding: const EdgeInsets.only(bottom: 8),
+                      child: VClubTeamRow(
+                        teamName: team.name,
+                        seriesLabel: team.leagueName,
+                        nextMatch: nextMatchString,
+                        isFavorite: team.isFavorite,
+                        onTap: () => Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (_) => TeamDetailPage(
+                              team: team,
+                              preLoadName: team.name,
+                            ),
+                          ),
+                        ),
+                        onFavoriteTap: () {
+                          VToastOverlay.show(
+                            context,
+                            team.isFavorite ? 'Verwijderd' : 'Toegevoegd',
+                          );
+                        },
+                      ),
+                    );
+                  },
                 );
               }),
             ],
@@ -999,19 +1044,29 @@ class _ClubDetailPageState extends State<ClubDetailPage> {
   }
 }
 
-class TeamDetailPage extends StatelessWidget {
-  final String teamName;
-  final String leagueName;
-  const TeamDetailPage({
-    super.key,
-    required this.teamName,
-    required this.leagueName,
-  });
+class TeamDetailPage extends StatefulWidget {
+  final TeamModel team;
+  final String preLoadName;
+
+  const TeamDetailPage({super.key, required this.team, this.preLoadName = ''});
+
+  @override
+  State<TeamDetailPage> createState() => _TeamDetailPageState();
+}
+
+class _TeamDetailPageState extends State<TeamDetailPage> {
+  late Future<TeamModel> _teamFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    _teamFuture = widget.team.load();
+  }
 
   @override
   Widget build(BuildContext context) {
-    final matches = StaticData.teamMatches[teamName] ?? [];
-    Map<String, Map<String, dynamic>> grouped = {};
+    final String preLoadName = widget.preLoadName;
+
     final maanden = [
       'januari',
       'februari',
@@ -1026,17 +1081,6 @@ class TeamDetailPage extends StatelessWidget {
       'november',
       'december',
     ];
-
-    for (var m in matches) {
-      final parts = m['time'].split('/');
-      final key = '${parts[1]}/${parts[2]}';
-      final label = '${maanden[int.parse(parts[1]) - 1]} ${parts[2]}';
-      grouped.putIfAbsent(
-        key,
-        () => {'label': label, 'matches': <Map<String, dynamic>>[]},
-      );
-      (grouped[key]!['matches'] as List<Map<String, dynamic>>).add(m);
-    }
 
     return Scaffold(
       backgroundColor: primary,
@@ -1054,18 +1098,25 @@ class TeamDetailPage extends StatelessWidget {
             child: const Icon(Icons.chevron_left, color: light, size: 16),
           ),
         ),
-        title: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              teamName,
-              style: VTextStyles.h3,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-            ),
-            const SizedBox(height: 3),
-            VLeagueBadge(label: leagueName),
-          ],
+        title: FutureBuilder(
+          future: _teamFuture,
+          builder: (context, snapshot) {
+            if (!snapshot.hasData) {
+              return Text(
+                preLoadName,
+                style: VTextStyles.h3,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              );
+            } else {
+              return Text(
+                snapshot.data!.name,
+                style: VTextStyles.h3,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              );
+            }
+          },
         ),
         actions: [
           Padding(
@@ -1077,56 +1128,108 @@ class TeamDetailPage extends StatelessWidget {
           ),
         ],
       ),
-      body: matches.isEmpty
-          ? VEmptyState(
+      body: FutureBuilder<TeamModel>(
+        future: _teamFuture,
+        builder: (context, snapshot) {
+          if (snapshot.connectionState == ConnectionState.waiting) {
+            return const VEmptyState(
+              icon: Icons.calendar_month_outlined,
+              title: 'Wedstrijden laden',
+              subtitle: 'Even geduld, we halen de wedstrijden op...',
+            );
+          }
+
+          if (!snapshot.hasData || snapshot.data!.games.isEmpty) {
+            return const VEmptyState(
               icon: Icons.calendar_month_outlined,
               title: 'Geen wedstrijden beschikbaar',
               subtitle: 'De wedstrijdata worden binnenkort bekendgemaakt.',
-            )
-          : ListView.builder(
-              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
-              itemCount: grouped.length + 1,
-              itemBuilder: (context, index) {
-                if (index == 0) return const SizedBox.shrink();
-                final entry = grouped.entries.elementAt(index - 1);
-                final monthData = entry.value;
+            );
+          }
 
-                final dagen = ['Zo', 'Ma', 'Di', 'Wo', 'Do', 'Vr', 'Za'];
-                final matchesList =
-                    monthData['matches'] as List<Map<String, dynamic>>;
-                final mParts = matchesList.first['time'].split('/');
-                final d = DateTime(
-                  int.parse(mParts[2]),
-                  int.parse(mParts[1]),
-                  int.parse(mParts[0]),
-                );
+          final team = snapshot.data!;
 
-                return Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    VDateDivider(label: monthData['label'] as String),
-                    ...matchesList.map(
-                      (m) => Padding(
-                        padding: const EdgeInsets.only(bottom: 8),
-                        child: VTeamDetailMatchCard(
-                          homeTeam: m['home_team'] as String,
-                          awayTeam: m['away_team'] as String,
-                          result: m['result'] as String?,
-                          venue: m['venue'] as String,
-                          dateDay: dagen[d.weekday - 1],
-                          dateNum: d.day,
-                          dateMonth: maanden[d.month - 1].substring(0, 3),
-                          timeString: m['match_time'] as String,
-                          isHomeTeam: (m['home_team'] as String).contains(
-                            teamName.split(' ').last,
-                          ),
+          final dagen = ['Zo', 'Ma', 'Di', 'Wo', 'Do', 'Vr', 'Za'];
+          final maanden = [
+            'januari',
+            'februari',
+            'maart',
+            'april',
+            'mei',
+            'juni',
+            'juli',
+            'augustus',
+            'september',
+            'oktober',
+            'november',
+            'december',
+          ];
+
+          final Map<String, Map<String, dynamic>> grouped = {};
+
+          for (final m in team.games) {
+            final parts = m.date.split('/');
+
+            final day = int.parse(parts[0]);
+            final month = int.parse(parts[1]);
+            final year = int.parse(parts[2]);
+
+            final key = '$month/$year';
+            final label = '${maanden[month - 1]} $year';
+
+            grouped.putIfAbsent(
+              key,
+              () => {'label': label, 'matches': <GameModel>[]},
+            );
+
+            (grouped[key]!['matches'] as List<GameModel>).add(m);
+          }
+
+          final sections = grouped.entries.toList();
+
+          return ListView.builder(
+            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+            itemCount: sections.length,
+            itemBuilder: (context, index) {
+              final section = sections[index];
+              final matches = section.value['matches'] as List<GameModel>;
+
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  VDateDivider(label: section.value['label'] as String),
+
+                  ...matches.map((m) {
+                    final parts = m.date.split('/');
+                    final day = int.parse(parts[0]);
+                    final month = int.parse(parts[1]);
+                    final year = int.parse(parts[2]);
+
+                    final date = DateTime(year, month, day);
+
+                    return Padding(
+                      padding: const EdgeInsets.only(bottom: 8),
+                      child: VTeamDetailMatchCard(
+                        homeTeam: m.homeTeam.name,
+                        awayTeam: m.awayTeam.name,
+                        result: m.result,
+                        venue: m.venue,
+                        dateDay: dagen[date.weekday % 7],
+                        dateNum: day,
+                        dateMonth: maanden[month - 1].substring(0, 3),
+                        timeString: m.time,
+                        isHomeTeam: m.homeTeam.name.contains(
+                          team.name.split(' ').last,
                         ),
                       ),
-                    ),
-                  ],
-                );
-              },
-            ),
+                    );
+                  }),
+                ],
+              );
+            },
+          );
+        },
+      ),
     );
   }
 }
@@ -1134,7 +1237,6 @@ class TeamDetailPage extends StatelessWidget {
 // ============================================================
 // STATISCHE DATA MODELLEN
 // ============================================================
-// TODO: Marker
 class ClubModel {
   final String name;
   final String code;
@@ -1144,10 +1246,8 @@ class ClubModel {
   final String website;
   final String clubId;
 
-  // FIXME
-  // Temporary raw structures (intentional step before TeamModel)
-  final List<Map<String, dynamic>> compTeams;
-  final List<Map<String, dynamic>> cupTeams;
+  final List<TeamModel> compTeams;
+  final List<TeamModel> cupTeams;
 
   const ClubModel({
     required this.label,
@@ -1174,56 +1274,188 @@ class ClubModel {
       secretary: general['Secretaris']?.toString() ?? '',
       website: general['Website']?.toString() ?? '',
 
-      compTeams: (json['competition_teams'] as List<dynamic>? ?? [])
-          .cast<Map<String, dynamic>>(),
+      compTeams:
+          (json['competition_teams'] as List?)?.map((m) {
+            String leagueCode = m["series"].split(" ").last;
+            String teamLabel = "$leagueCode ${m['team']}";
+            return TeamModel(label: teamLabel, teamId: m["id"].toString());
+          }).toList() ??
+          [],
 
-      cupTeams: (json['cup_teams'] as List<dynamic>? ?? [])
-          .cast<Map<String, dynamic>>(),
+      cupTeams:
+          (json['cup_teams'] as List?)?.map((m) {
+            String leagueCode = m["series"].split(" ").last;
+            String teamLabel = "$leagueCode ${m['team']}";
+            return TeamModel(label: teamLabel, teamId: m["id"].toString());
+          }).toList() ??
+          [],
     );
   }
 
   Future<ClubModel> load() async {
-    dynamic data;
-    final uri = Uri.parse(
-      'https://volleyapi.sqnder.dev/api/get/club?club_label=$label&club_id=$clubId',
-    );
-    final response = await http.get(uri).timeout(const Duration(seconds: 5));
+    final key = clubId;
+    if (_clubCache.containsKey(key)) {
+      return _clubCache[key]!;
+    }
 
-    if (response.statusCode == 200) {
-      data = jsonDecode(response.body);
-    } else {
+    final uri = Uri.parse(
+      '${apiBaseUrl}api/get/club?club_label=$label&club_id=$clubId',
+    );
+    final response = await http.get(uri);
+
+    if (response.statusCode != 200) {
       debugPrint('API Error: ${response.statusCode} - ${response.body}');
       throw Exception('API Error: ${response.statusCode} - ${response.body}');
     }
-    return ClubModel.fromJson(data);
+    final data = jsonDecode(response.body);
+    final club = ClubModel.fromJson(data);
+
+    _clubCache[key] = club;
+    return club;
   }
 }
 
-class SearchTeamModel {
+class TeamModel {
+  final String label;
   final String name;
   final String leagueName;
   final String teamId;
   final String leagueId;
+  final List<GameModel> games;
+  final bool isLoaded;
   final bool isFavorite;
 
-  const SearchTeamModel({
-    required this.name,
-    required this.leagueName,
-    this.teamId = '',
+  const TeamModel({
+    required this.label,
+    required this.teamId,
+    this.name = '',
+    this.leagueName = '',
     this.leagueId = '',
+    this.games = const [],
+    this.isLoaded = false,
     this.isFavorite = false,
   });
 
-  factory SearchTeamModel.fromJson(Map<String, dynamic> json) {
+  factory TeamModel.fromJson(
+    Map<String, dynamic> json, {
+    bool isLoaded = false,
+  }) {
     final label = json['label'] ?? '';
     final match = RegExp(r'\(([^)]+)\)').firstMatch(label);
     final leagueIdRaw = match?.group(1) ?? '';
+    final games =
+        (json['matches'] as List?)
+            ?.map((m) => GameModel.fromJson(m))
+            .toList() ??
+        [];
 
-    return SearchTeamModel(
-      name: json['name'] ?? '',
-      leagueName: leagueIdRaw,
+    return TeamModel(
+      label: label,
       teamId: json['team_id']?.toString() ?? '',
+      name: json['name'] ?? '',
+      leagueName: json['league'] ?? leagueIdRaw,
       leagueId: leagueIdRaw,
+      games: games,
+    );
+  }
+
+  Future<TeamModel> load({bool forceReload = false}) async {
+    final key = teamId;
+
+    if (_teamCache.containsKey(key) && !forceReload) {
+      return _teamCache[key]!;
+    }
+
+    final uri = Uri.parse(
+      '${apiBaseUrl}api/get/team?label=${_cleanLabel()}&team_id=$teamId',
+    );
+    final response = await http.get(uri).timeout(const Duration(seconds: 10));
+
+    if (response.statusCode != 200) {
+      debugPrint('API Error: ${response.statusCode} - ${response.body}');
+      throw Exception('API Error: ${response.statusCode} - ${response.body}');
+    }
+
+    final data = jsonDecode(response.body);
+    final team = TeamModel.fromJson(data, isLoaded: true);
+
+    _teamCache[key] = team;
+
+    return team;
+  }
+
+  String _cleanLabel() {
+    const ignoreList = ["(+)"];
+    final trimmed = label.trim();
+
+    if (trimmed.endsWith(')')) {
+      final lastOpen = trimmed.lastIndexOf('(');
+      if (lastOpen != -1) {
+        final suffix = trimmed.substring(lastOpen);
+
+        if (ignoreList.contains(suffix)) {
+          return trimmed.substring(0, lastOpen).trimRight();
+        }
+      }
+    }
+
+    final plusIndex = trimmed.lastIndexOf('+');
+    if (plusIndex != -1 && plusIndex > trimmed.length - 5) {
+      final afterPlus = trimmed.substring(plusIndex);
+
+      final isNumericSuffix = RegExp(r'^\+\d+$').hasMatch(afterPlus);
+
+      if (isNumericSuffix) {
+        return trimmed.substring(0, plusIndex).trimRight();
+      }
+    }
+
+    return trimmed;
+  }
+}
+
+class GameModel {
+  final String matchCode;
+  final String day;
+  final String date;
+  final String time;
+  final TeamModel homeTeam;
+  final TeamModel awayTeam;
+  final String venue;
+  final String result;
+
+  const GameModel({
+    required this.matchCode,
+    required this.day,
+    required this.date,
+    required this.time,
+    required this.homeTeam,
+    required this.awayTeam,
+    required this.venue,
+    required this.result,
+  });
+
+  factory GameModel.fromJson(Map<String, dynamic> json) {
+    final String code = json["match_code"];
+    final String leagueId = "(${code.split("-")[0]})";
+
+    return GameModel(
+      matchCode: json["match_code"],
+      day: json["day"],
+      date: json["date"],
+      time: json["time"],
+      homeTeam: TeamModel(
+        label: "$leagueId ${json["home_team"]["name"]}",
+        teamId: json["home_team"]["team_id"].toString(),
+        name: json["home_team"]["name"],
+      ),
+      awayTeam: TeamModel(
+        label: "$leagueId ${json["away_team"]["name"]}",
+        teamId: json["away_team"]["team_id"].toString(),
+        name: json["away_team"]["name"],
+      ),
+      venue: json["venue"],
+      result: json["result"],
     );
   }
 }
@@ -1252,48 +1484,6 @@ class FavoriteTeamModel {
 }
 
 class StaticData {
-  static final kregConstruct = ClubModel(
-    label: 'VB-1849 Kreg Rotselaar',
-    clubId: '11136',
-  );
-
-  static final mendoConstruct = ClubModel(
-    label: 'AH-1260 Mendo Booischot"',
-    clubId: '10911',
-  );
-
-  Future<List<ClubModel>> getClubs() async {
-    final kreg = await kregConstruct.load();
-    final mendo = await mendoConstruct.load();
-    return [kreg, mendo];
-  }
-
-  static final List<SearchTeamModel> searchTeams = const [
-    SearchTeamModel(
-      name: 'Rotselaar A',
-      leagueName: 'Heren Promo 1',
-      isFavorite: true,
-    ),
-    SearchTeamModel(name: 'Rotselaar B', leagueName: 'Heren Promo 3B'),
-    SearchTeamModel(name: 'Rotselaar A', leagueName: 'Dames Promo 1'),
-    SearchTeamModel(name: 'Mendo Booischot A', leagueName: 'Nationale 1 Heren'),
-    SearchTeamModel(
-      name: 'Mendo Booischot B',
-      leagueName: 'Nationale 2 Heren B',
-      isFavorite: true,
-    ),
-    SearchTeamModel(
-      name: 'Mendo Booischot C',
-      leagueName: 'Nationale 3 Heren B',
-    ),
-    SearchTeamModel(
-      name: 'Mendo Booischot A',
-      leagueName: 'Nationale 2 Dames B',
-      isFavorite: true,
-    ),
-    SearchTeamModel(name: 'Mendo Booischot D', leagueName: 'Heren Promo 2'),
-  ];
-
   static final List<FavoriteTeamModel> favoriteTeams = const [
     FavoriteTeamModel(
       name: 'Kreg Rotselaar A',
