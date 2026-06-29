@@ -20,8 +20,9 @@ import 'dart:async';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
 
-// FIXME replace apiBaseUrl with https://volleyapi.sqnder.dev/
-const String apiBaseUrl = "http://192.168.1.43:8000/";
+const String apiBaseUrl = "http://volleyapi.sqnder.dev/";
+// const String apiBaseUrl = "http://192.168.1.43:8000/";
+const String dot = "\u00B7";
 
 // ============================================================
 // CACHE
@@ -1001,10 +1002,19 @@ class _ClubDetailPageState extends State<ClubDetailPage> {
 
                     final team = snapshot.data!;
                     var nextMatchString = "Geen volgende wedstrijd";
+                    String? venue;
+
                     if (team.games.isNotEmpty) {
-                      final nextMatch = team.games.first;
+                      GameModel nextMatch = team.games.first;
+                      venue = nextMatch.venue;
+                      int last = nextMatch.date.length;
+
+                      String date = (last == 10)
+                          ? nextMatch.date.substring(0, (last - 5))
+                          : nextMatch.date;
+
                       nextMatchString =
-                          "${nextMatch.date} ${nextMatch.time} "
+                          "$date $dot ${nextMatch.time} $dot"
                           "${nextMatch.homeTeam.name} - "
                           "${nextMatch.awayTeam.name}";
                     }
@@ -1015,6 +1025,7 @@ class _ClubDetailPageState extends State<ClubDetailPage> {
                         teamName: team.name,
                         seriesLabel: team.leagueName,
                         nextMatch: nextMatchString,
+                        venue: venue,
                         isFavorite: team.isFavorite,
                         onTap: () => Navigator.push(
                           context,

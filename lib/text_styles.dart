@@ -48,6 +48,13 @@ class VTextStyles {
     color: secondary,
   );
 
+  static const TextStyle bodySecondaryBright = TextStyle(
+    fontFamily: _fontBody,
+    fontSize: 12,
+    fontWeight: FontWeight.w500,
+    color: secondaryBright,
+  );
+
   static const TextStyle caption = TextStyle(
     fontFamily: _fontBody,
     fontSize: 11,
