@@ -85,11 +85,11 @@ class VClubTeamRow extends StatelessWidget {
             ),
             if (!isLoading && nextMatch != null) ...[
               const SizedBox(height: 10),
-              const Divider(color: cardBorder, height: 1),
+              Divider(color: cardBorder, height: 1),
               const SizedBox(height: 10),
               Row(
                 children: [
-                  const Icon(
+                  Icon(
                     Icons.navigate_next_rounded,
                     size: 16,
                     color: secondaryBright,
@@ -105,19 +105,21 @@ class VClubTeamRow extends StatelessWidget {
                   const SizedBox(width: 4),
                 ],
               ),
-              Row(
-                children: [
-                  const Icon(
-                    Icons.location_on_outlined,
-                    color: secondary,
-                    size: 14,
-                  ),
-                  Padding(
-                    padding: const EdgeInsets.only(top: 2, left: 2),
-                    child: Text(venue!, style: VTextStyles.caption),
-                  ),
-                ],
-              ),
+              if (venue != null && venue!.isNotEmpty) ...[
+                Row(
+                  children: [
+                    Icon(
+                      Icons.location_on_outlined,
+                      color: secondary,
+                      size: 14,
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.only(top: 2, left: 2),
+                      child: Text(venue!, style: VTextStyles.caption),
+                    ),
+                  ],
+                ),
+              ],
             ],
           ],
         ),
@@ -137,7 +139,7 @@ class _SkeletonBox extends StatelessWidget {
       width: width,
       height: height,
       decoration: BoxDecoration(
-        color: Colors.white.withValues(alpha: 0.06),
+        color: skeletonColor,
         borderRadius: BorderRadius.circular(6),
       ),
     );
@@ -153,10 +155,7 @@ class _SkeletonCircle extends StatelessWidget {
     return Container(
       width: size,
       height: size,
-      decoration: BoxDecoration(
-        color: Colors.white.withValues(alpha: 0.06),
-        shape: BoxShape.circle,
-      ),
+      decoration: BoxDecoration(color: skeletonColor, shape: BoxShape.circle),
     );
   }
 }

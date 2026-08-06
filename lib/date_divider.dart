@@ -23,7 +23,7 @@ class VDateDivider extends StatelessWidget {
             ),
           ),
           const SizedBox(width: 10),
-          const Expanded(child: Divider(color: cardBorder, height: 1)),
+          Expanded(child: Divider(color: cardBorder, height: 1)),
           if (countLabel != null) ...[
             const SizedBox(width: 10),
             Text(countLabel!, style: VTextStyles.caption),

@@ -3,7 +3,7 @@ import 'colors.dart';
 import 'text_styles.dart';
 
 class VRankingRow extends StatelessWidget {
-  final int position;
+  final String position;
   final String teamName;
   final int wins;
   final int losses;
@@ -79,8 +79,8 @@ class VRankingRow extends StatelessWidget {
   }
 
   Widget _buildHeader() {
-    return const Padding(
-      padding: EdgeInsets.only(bottom: 4),
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 4),
       child: Row(
         children: [
           SizedBox(

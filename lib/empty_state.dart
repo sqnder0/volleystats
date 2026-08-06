@@ -21,8 +21,11 @@ class VEmptyState extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 60, horizontal: 20),
+      padding: const EdgeInsets.symmetric(vertical: 40, horizontal: 20),
       child: Column(
+        mainAxisSize: MainAxisSize.min,
+        mainAxisAlignment: MainAxisAlignment.center,
+        crossAxisAlignment: CrossAxisAlignment.center,
         children: [
           Icon(icon, size: 48, color: secondary),
           const SizedBox(height: 16),
@@ -51,7 +54,7 @@ class VEmptyState extends StatelessWidget {
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    const Icon(Icons.search, size: 14, color: primary),
+                    Icon(Icons.search, size: 14, color: primary),
                     const SizedBox(width: 8),
                     Text(
                       actionLabel!,

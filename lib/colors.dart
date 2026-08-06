@@ -1,13 +1,47 @@
 import 'package:flutter/material.dart';
+import 'theme_service.dart';
+import 'theme_palette.dart';
 
-const Color primary = Color(0xFF040D1C);
-const Color accentYellow = Color(0xFFFFC902);
-const Color accentRed = Color(0xFFDE2B36);
-const Color light = Color(0xFFF4F3F4);
-const Color secondary = Color(0xFF646A78);
-const Color secondaryBright = Color(0xFF8B9DB5);
-const Color dark = Color(0xFF131926);
+// ============================================================
+// THEME MAPPING
+// Use this file to map VPalette colors to UI properties.
+// ============================================================
 
-const Color cardBg = Color(0xFF0F1829);
-const Color cardBorder = Color(0xFF1C2840);
-const Color cardBgAlt = Color(0xFF182438);
+Color get primary =>
+    ThemeService.isDarkMode ? VPalette.navyDark : VPalette.whiteGhost;
+
+Color get light =>
+    ThemeService.isDarkMode ? VPalette.textWhite : VPalette.textBlack;
+
+Color get secondary =>
+    ThemeService.isDarkMode ? VPalette.textGrey : VPalette.textSlateLight;
+
+Color get secondaryBright =>
+    ThemeService.isDarkMode ? VPalette.textSlate : VPalette.textSlateDeep;
+
+Color get cardBg =>
+    ThemeService.isDarkMode ? VPalette.cardDark : VPalette.whitePure;
+
+Color get cardBorder =>
+    ThemeService.isDarkMode ? VPalette.borderDark : VPalette.borderLight;
+
+Color get cardBgAlt =>
+    ThemeService.isDarkMode ? VPalette.cardAltDark : VPalette.whiteAlt;
+
+Color get skeletonColor => ThemeService.isDarkMode
+    ? Colors.white.withValues(alpha: 0.06)
+    : Colors.black.withValues(alpha: 0.04);
+
+// Static Brand Colors
+const Color accentYellow = VPalette.yellow;
+const Color accentRed = VPalette.red;
+const Color dark = VPalette.pureDark;
+
+// Explicit Palette Access
+const Color textSlateDeep = VPalette.textSlateDeep;
+
+// Feature-specific dynamic colors
+Color get blueInfo => VPalette.blueInfo;
+Color get purpleLanguage => VPalette.purpleLanguage;
+Color get alertGold =>
+    ThemeService.isDarkMode ? VPalette.yellow : VPalette.alertDarkGold;

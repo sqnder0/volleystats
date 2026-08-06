@@ -18,7 +18,15 @@ import 'empty_state.dart';
 import 'toast_overlay.dart';
 import 'dart:async';
 import 'package:http/http.dart' as http;
+import 'package:url_launcher/url_launcher.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:open_filex/open_filex.dart';
 import 'dart:convert';
+import 'dart:io';
+import 'favorite_service.dart';
+import 'notification_service.dart';
+import 'theme_service.dart';
+import 'persistence_service.dart';
 
 const String apiBaseUrl = "http://volleyapi.sqnder.dev/";
 // const String apiBaseUrl = "http://192.168.1.43:8000/";
@@ -29,12 +37,46 @@ const String dot = "\u00B7";
 // ============================================================
 final Map<String, ClubModel> _clubCache = {};
 final Map<String, TeamModel> _teamCache = {};
+final Map<String, LeagueModel> _leagueCache = {};
 
 // ============================================================
 // Main
 // ============================================================
-void main() {
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+
+  // Initialize in parallel for faster startup
+  await Future.wait([
+    ThemeService.init(),
+    NotificationService.init(),
+    _loadPersistentCaches(),
+  ]);
+
+  // Start pre-loading favorites in background
+  FavoritesService.preloadFavorites();
   runApp(const VolleyStatsApp());
+}
+
+Future<void> _loadPersistentCaches() async {
+  try {
+    final clubsJson = await PersistenceService.loadClubs();
+    clubsJson.forEach((key, value) {
+      _clubCache[key] = ClubModel.fromJson(value as Map<String, dynamic>);
+    });
+
+    final teamsJson = await PersistenceService.loadTeams();
+    teamsJson.forEach((key, value) {
+      _teamCache[key] = TeamModel.fromJson(value as Map<String, dynamic>);
+    });
+
+    final leaguesJson = await PersistenceService.loadLeagues();
+    leaguesJson.forEach((key, value) {
+      _leagueCache[key] = LeagueModel.fromJson(value as Map<String, dynamic>);
+    });
+    debugPrint('Persistent caches loaded successfully');
+  } catch (e) {
+    debugPrint('Error loading persistent caches: $e');
+  }
 }
 
 class VolleyStatsApp extends StatelessWidget {
@@ -42,11 +84,20 @@ class VolleyStatsApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'VolleyStats',
-      debugShowCheckedModeBanner: false,
-      theme: ThemeData(scaffoldBackgroundColor: primary, fontFamily: 'DM Sans'),
-      home: const MainShell(),
+    return ValueListenableBuilder<bool>(
+      valueListenable: ThemeService.darkModeNotifier,
+      builder: (context, isDarkMode, child) {
+        return MaterialApp(
+          title: 'VolleyStats',
+          debugShowCheckedModeBanner: false,
+          theme: ThemeData(
+            scaffoldBackgroundColor: primary,
+            fontFamily: 'DM Sans',
+            brightness: isDarkMode ? Brightness.dark : Brightness.light,
+          ),
+          home: const MainShell(),
+        );
+      },
     );
   }
 }
@@ -60,14 +111,30 @@ class MainShell extends StatefulWidget {
 
 class _MainShellState extends State<MainShell> {
   int _currentIndex = 0;
+  late List<Widget> _pages;
 
-  final List<Widget> _pages = const [
-    HomePage(),
-    SearchPage(),
-    RankingsPage(),
-    FavoritesPage(),
-    MorePage(),
-  ];
+  @override
+  void initState() {
+    super.initState();
+    _pages = [
+      const HomePage(),
+      const SearchPage(),
+      const RankingsPage(),
+      const FavoritesPage(),
+      const MorePage(),
+    ];
+    ThemeService.darkModeNotifier.addListener(_onThemeChanged);
+  }
+
+  @override
+  void dispose() {
+    ThemeService.darkModeNotifier.removeListener(_onThemeChanged);
+    super.dispose();
+  }
+
+  void _onThemeChanged() {
+    if (mounted) setState(() {});
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -78,7 +145,7 @@ class _MainShellState extends State<MainShell> {
       ),
       bottomNavigationBar: Container(
         height: 72,
-        decoration: const BoxDecoration(color: primary),
+        decoration: BoxDecoration(color: primary),
         child: Row(
           mainAxisAlignment: MainAxisAlignment.spaceAround,
           children: [
@@ -135,103 +202,247 @@ class HomePage extends StatefulWidget {
 
 class _HomePageState extends State<HomePage> {
   String _filter = 'all';
+  late Future<List<Map<String, dynamic>>> _homeMatchesFuture;
 
-  List<Map<String, dynamic>> get _filteredMatches {
-    if (_filter == 'week') return StaticData.homeMatches.take(4).toList();
-    if (_filter == 'month') return StaticData.homeMatches.take(8).toList();
-    return StaticData.homeMatches;
+  @override
+  void initState() {
+    super.initState();
+    _loadHomeMatches();
+    FavoritesService.favoritesNotifier.addListener(_loadHomeMatches);
+  }
+
+  @override
+  void dispose() {
+    FavoritesService.favoritesNotifier.removeListener(_loadHomeMatches);
+    super.dispose();
+  }
+
+  void _loadHomeMatches() {
+    setState(() {
+      _homeMatchesFuture = _fetchHomeMatches();
+    });
+  }
+
+  Future<List<Map<String, dynamic>>> _fetchHomeMatches() async {
+    final favorites = await FavoritesService.loadFavorites();
+    if (favorites.isEmpty) return [];
+
+    final List<Map<String, dynamic>> allMatches = [];
+    final Set<String> matchCodes = {};
+
+    for (var favTeam in favorites) {
+      try {
+        final fullTeam = await favTeam.load();
+        for (var game in fullTeam.games) {
+          if (!matchCodes.contains(game.matchCode)) {
+            matchCodes.add(game.matchCode);
+            allMatches.add({
+              'home_team': game.homeTeam.name,
+              'away_team': game.awayTeam.name,
+              'result': game.result,
+              'venue': game.venue,
+              'league_name': fullTeam.leagueName,
+              'time': game.date, // DD/MM/YYYY
+              'match_time': game.time,
+              'is_fav_home': game.homeTeam.teamId == favTeam.teamId,
+              'fav_name': fullTeam.name,
+              'team_model': fullTeam,
+              'date_obj': _parseDate(game.date),
+            });
+          }
+        }
+      } catch (e) {
+        debugPrint('Error loading home matches for ${favTeam.label}: $e');
+      }
+    }
+
+    // Sort by date and then time
+    allMatches.sort((a, b) {
+      final dateA = a['date_obj'] as DateTime;
+      final dateB = b['date_obj'] as DateTime;
+      int cmp = dateA.compareTo(dateB);
+      if (cmp != 0) return cmp;
+      return (a['match_time'] as String).compareTo(b['match_time'] as String);
+    });
+
+    return allMatches;
+  }
+
+  DateTime _parseDate(String dateStr) {
+    try {
+      final parts = dateStr.split('/');
+      return DateTime(
+        int.parse(parts[2]),
+        int.parse(parts[1]),
+        int.parse(parts[0]),
+      );
+    } catch (e) {
+      return DateTime.now();
+    }
+  }
+
+  List<Map<String, dynamic>> _applyFilter(List<Map<String, dynamic>> matches) {
+    if (_filter == 'all') return matches;
+
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+
+    if (_filter == 'week') {
+      final nextWeek = today.add(const Duration(days: 7));
+      return matches.where((m) {
+        final d = m['date_obj'] as DateTime;
+        return (d.isAtSameMomentAs(today) || d.isAfter(today)) &&
+            d.isBefore(nextWeek);
+      }).toList();
+    }
+
+    if (_filter == 'month') {
+      final nextMonth = today.add(const Duration(days: 30));
+      return matches.where((m) {
+        final d = m['date_obj'] as DateTime;
+        return (d.isAtSameMomentAs(today) || d.isAfter(today)) &&
+            d.isBefore(nextMonth);
+      }).toList();
+    }
+
+    return matches;
   }
 
   @override
   Widget build(BuildContext context) {
-    final filtered = _filteredMatches;
-
-    return ListView(
-      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-      children: [
-        // Header
-        Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text('VolleyStats', style: VTextStyles.h1),
-                const SizedBox(height: 2),
-              ],
-            ),
-            GestureDetector(
-              onTap: () =>
-                  VToastOverlay.show(context, 'Geen nieuwe notificaties'),
-              child: Container(
-                width: 38,
-                height: 38,
-                decoration: BoxDecoration(
-                  color: cardBg,
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: cardBorder),
-                ),
-                child: Stack(
-                  alignment: Alignment.center,
-                  children: [
-                    const Icon(
-                      Icons.notifications_outlined,
-                      size: 15,
-                      color: secondary,
-                    ),
-                    Positioned(
-                      top: 6,
-                      right: 6,
-                      child: Container(
-                        width: 7,
-                        height: 7,
-                        decoration: const BoxDecoration(
-                          color: accentRed,
-                          shape: BoxShape.circle,
-                        ),
+    return CustomScrollView(
+      slivers: [
+        SliverPadding(
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+          sliver: SliverList(
+            delegate: SliverChildListDelegate([
+              // Header
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('VolleyStats', style: VTextStyles.h1),
+                      const SizedBox(height: 2),
+                    ],
+                  ),
+                  GestureDetector(
+                    onTap: () =>
+                        VToastOverlay.show(context, 'Geen nieuwe notificaties'),
+                    child: Container(
+                      width: 38,
+                      height: 38,
+                      decoration: BoxDecoration(
+                        color: cardBg,
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: cardBorder),
+                      ),
+                      child: Stack(
+                        alignment: Alignment.center,
+                        children: [
+                          Icon(
+                            Icons.notifications_outlined,
+                            size: 15,
+                            color: secondary,
+                          ),
+                          Positioned(
+                            top: 6,
+                            right: 6,
+                            child: Container(
+                              width: 7,
+                              height: 7,
+                              decoration: BoxDecoration(
+                                color: accentRed,
+                                shape: BoxShape.circle,
+                                border: Border.all(color: cardBg, width: 1.5),
+                              ),
+                            ),
+                          ),
+                        ],
                       ),
                     ),
-                  ],
-                ),
+                  ),
+                ],
               ),
-            ),
-          ],
-        ),
-        const SizedBox(height: 20),
-        const SizedBox(height: 20),
+              const SizedBox(height: 20),
 
-        // Filters
-        Row(
-          children: [
-            VFilterTab(
-              label: 'Alles',
-              isActive: _filter == 'all',
-              onTap: () => setState(() => _filter = 'all'),
-            ),
-            const SizedBox(width: 8),
-            VFilterTab(
-              label: 'Deze week',
-              isActive: _filter == 'week',
-              onTap: () => setState(() => _filter = 'week'),
-            ),
-            const SizedBox(width: 8),
-            VFilterTab(
-              label: 'Deze maand',
-              isActive: _filter == 'month',
-              onTap: () => setState(() => _filter = 'month'),
-            ),
-          ],
+              // Filters
+              Row(
+                children: [
+                  VFilterTab(
+                    label: 'Alles',
+                    isActive: _filter == 'all',
+                    onTap: () => setState(() => _filter = 'all'),
+                  ),
+                  const SizedBox(width: 8),
+                  VFilterTab(
+                    label: 'Deze week',
+                    isActive: _filter == 'week',
+                    onTap: () => setState(() => _filter = 'week'),
+                  ),
+                  const SizedBox(width: 8),
+                  VFilterTab(
+                    label: 'Deze maand',
+                    isActive: _filter == 'month',
+                    onTap: () => setState(() => _filter = 'month'),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 18),
+            ]),
+          ),
         ),
-        const SizedBox(height: 18),
+        FutureBuilder<List<Map<String, dynamic>>>(
+          future: _homeMatchesFuture,
+          builder: (context, snapshot) {
+            if (snapshot.connectionState == ConnectionState.waiting) {
+              return const SliverToBoxAdapter(
+                child: Center(
+                  child: Padding(
+                    padding: EdgeInsets.only(top: 40),
+                    child: CircularProgressIndicator(color: accentYellow),
+                  ),
+                ),
+              );
+            }
 
-        // Match lijst
-        ..._buildMatchList(filtered),
+            final matches = snapshot.data ?? [];
+            if (matches.isEmpty) {
+              return const SliverToBoxAdapter(
+                child: VEmptyState(
+                  icon: Icons.sports_volleyball_outlined,
+                  title: 'Geen wedstrijden',
+                  subtitle:
+                      'Volg teams om hun wedstrijden hier te zien verschijnen.',
+                ),
+              );
+            }
+
+            final filtered = _applyFilter(matches);
+            if (filtered.isEmpty) {
+              return const SliverToBoxAdapter(
+                child: VEmptyState(
+                  icon: Icons.event_busy_outlined,
+                  title: 'Geen wedstrijden',
+                  subtitle: 'Geen wedstrijden gevonden voor deze periode.',
+                ),
+              );
+            }
+
+            return SliverPadding(
+              padding: const EdgeInsets.symmetric(horizontal: 20),
+              sliver: _buildSliverMatchList(filtered),
+            );
+          },
+        ),
+        const SliverToBoxAdapter(child: SizedBox(height: 24)),
       ],
     );
   }
 
-  List<Widget> _buildMatchList(List<Map<String, dynamic>> matches) {
-    final List<Widget> widgets = [];
+  Widget _buildSliverMatchList(List<Map<String, dynamic>> matches) {
+    final List<Map<String, dynamic>> items = [];
     Map<String, List<Map<String, dynamic>>> grouped = {};
 
     for (var m in matches) {
@@ -240,39 +451,53 @@ class _HomePageState extends State<HomePage> {
     }
 
     for (var entry in grouped.entries) {
-      final dateLabel = _formatDateFull(entry.key);
-      widgets.add(
-        VDateDivider(
-          label: dateLabel,
-          countLabel: '${entry.value.length} wed.',
-        ),
-      );
+      // Header item
+      items.add({
+        'type': 'header',
+        'label': entry.key,
+        'count': entry.value.length,
+      });
+      // Match items
       for (var m in entry.value) {
-        widgets.add(
-          VMatchCard(
-            homeTeam: m['home_team'],
-            awayTeam: m['away_team'],
-            result: m['result'],
-            venue: m['venue'],
-            leagueName: m['league_name'],
-            time: m['match_time'],
-            isFavTeamHome: m['is_fav_home'] == true,
-            showFavBorder: true,
-            // onTap: () => Navigator.push(
-            //   context,
-            //   MaterialPageRoute(
-            //     builder: (_) => TeamDetailPage(
-            //       teamName: m['fav_name'],
-            //       leagueName: m['league_name'],
-            //     ),
-            //   ),
-            // ),
-          ),
-        );
-        widgets.add(const SizedBox(height: 8));
+        items.add({'type': 'match', 'data': m});
       }
     }
-    return widgets;
+
+    return SliverList(
+      delegate: SliverChildBuilderDelegate((context, index) {
+        final item = items[index];
+        if (item['type'] == 'header') {
+          return VDateDivider(
+            label: _formatDateFull(item['label']),
+            countLabel: '${item['count']} wed.',
+          );
+        } else {
+          final m = item['data'];
+          return Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: VMatchCard(
+              homeTeam: m['home_team'],
+              awayTeam: m['away_team'],
+              result: m['result'],
+              venue: m['venue'],
+              leagueName: m['league_name'],
+              time: m['match_time'],
+              isFavTeamHome: m['is_fav_home'] == true,
+              showFavBorder: true,
+              onTap: () => Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => TeamDetailPage(
+                    team: m['team_model'],
+                    preLoadName: m['fav_name'],
+                  ),
+                ),
+              ),
+            ),
+          );
+        }
+      }, childCount: items.length),
+    );
   }
 
   String _formatDateFull(String dateStr) {
@@ -315,14 +540,26 @@ class _SearchPageState extends State<SearchPage> {
 
   bool _isLoading = false;
   bool _hasSearched = false;
+  bool _isOffline = false;
   List<ClubModel> _apiClubs = [];
   List<TeamModel> _apiTeams = [];
 
   @override
+  void initState() {
+    super.initState();
+    ThemeService.darkModeNotifier.addListener(_onThemeChanged);
+  }
+
+  @override
   void dispose() {
+    ThemeService.darkModeNotifier.removeListener(_onThemeChanged);
     _controller.dispose();
     _debounce?.cancel();
     super.dispose();
+  }
+
+  void _onThemeChanged() {
+    if (mounted) setState(() {});
   }
 
   void _clearSearch() {
@@ -338,6 +575,7 @@ class _SearchPageState extends State<SearchPage> {
         _apiTeams = [];
         _hasSearched = false;
         _isLoading = false;
+        _isOffline = false;
       });
       return;
     }
@@ -345,9 +583,24 @@ class _SearchPageState extends State<SearchPage> {
     setState(() {
       _isLoading = true;
       _hasSearched = true;
+      _isOffline = false;
     });
 
     try {
+      // Proactive connectivity check
+      try {
+        final result = await InternetAddress.lookup('volleyapi.sqnder.dev');
+        if (result.isEmpty || result.first.address.isEmpty) {
+          throw const SocketException('No address found');
+        }
+      } catch (_) {
+        setState(() {
+          _isOffline = true;
+          _isLoading = false;
+        });
+        return;
+      }
+
       final uri = Uri.parse(
         '${apiBaseUrl}api/search?q=${Uri.encodeComponent(query)}',
       );
@@ -356,21 +609,32 @@ class _SearchPageState extends State<SearchPage> {
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
 
-        setState(() {
-          final clubsJson = data['clubs'] as List<dynamic>?;
-          final teamsJson = data['teams'] as List<dynamic>?;
+        final clubsJson = data['clubs'] as List<dynamic>?;
+        final teamsJson = data['teams'] as List<dynamic>?;
 
-          _apiClubs =
-              clubsJson
-                  ?.map((c) => ClubModel.fromJson(c as Map<String, dynamic>))
-                  .toList() ??
-              [];
-          _apiTeams =
-              teamsJson
-                  ?.map((t) => TeamModel.fromJson(t as Map<String, dynamic>))
-                  .toList() ??
-              [];
+        final clubs =
+            clubsJson
+                ?.map((c) => ClubModel.fromJson(c as Map<String, dynamic>))
+                .toList() ??
+            [];
+        final teams =
+            teamsJson
+                ?.map((t) => TeamModel.fromJson(t as Map<String, dynamic>))
+                .toList() ??
+            [];
+
+        // Check favorites
+        final favs = await FavoritesService.loadFavorites();
+        final favIds = favs.map((f) => f.teamId).toSet();
+        for (var t in teams) {
+          t.isFavorite = favIds.contains(t.teamId);
+        }
+
+        setState(() {
+          _apiClubs = clubs;
+          _apiTeams = teams;
           _isLoading = false;
+          _isOffline = false;
         });
       } else {
         debugPrint('API Error: ${response.statusCode} - ${response.body}');
@@ -382,8 +646,15 @@ class _SearchPageState extends State<SearchPage> {
       }
     } catch (e) {
       debugPrint('Search Error: $e');
-      setState(() => _isLoading = false);
-      VToastOverlay.show(context, 'Kon geen verbinding maken');
+      setState(() {
+        _isLoading = false;
+        if (e is SocketException) {
+          _isOffline = true;
+        }
+      });
+      if (!_isOffline) {
+        VToastOverlay.show(context, 'Kon geen verbinding maken');
+      }
     }
   }
 
@@ -413,12 +684,12 @@ class _SearchPageState extends State<SearchPage> {
           decoration: InputDecoration(
             hintText: 'Club of team zoeken...',
             hintStyle: VTextStyles.caption,
-            prefixIcon: const Icon(Icons.search, size: 14, color: secondary),
+            prefixIcon: Icon(Icons.search, size: 14, color: secondary),
             suffixIcon: _query.isNotEmpty
                 ? GestureDetector(
                     onTap: _clearSearch,
-                    child: const Padding(
-                      padding: EdgeInsets.all(12.0),
+                    child: Padding(
+                      padding: const EdgeInsets.all(12.0),
                       child: Icon(Icons.close, size: 16, color: secondary),
                     ),
                   )
@@ -427,11 +698,11 @@ class _SearchPageState extends State<SearchPage> {
             fillColor: cardBg,
             border: OutlineInputBorder(
               borderRadius: BorderRadius.circular(14),
-              borderSide: const BorderSide(color: cardBorder),
+              borderSide: BorderSide(color: cardBorder),
             ),
             enabledBorder: OutlineInputBorder(
               borderRadius: BorderRadius.circular(14),
-              borderSide: const BorderSide(color: cardBorder),
+              borderSide: BorderSide(color: cardBorder),
             ),
             focusedBorder: OutlineInputBorder(
               borderRadius: BorderRadius.circular(14),
@@ -448,6 +719,14 @@ class _SearchPageState extends State<SearchPage> {
         if (_isLoading) ...[
           const SizedBox(height: 60),
           const Center(child: CircularProgressIndicator(color: accentYellow)),
+        ] else if (_isOffline) ...[
+          VEmptyState(
+            icon: Icons.wifi_off_rounded,
+            title: 'Je bent offline',
+            subtitle: 'Controleer je verbinding om te kunnen zoeken.',
+            actionLabel: 'Opnieuw proberen',
+            onActionTap: () => _performSearch(_query),
+          ),
         ] else if (_query == '') ...[
           VEmptyState(
             icon: Icons.search,
@@ -485,12 +764,20 @@ class _SearchPageState extends State<SearchPage> {
                         TeamDetailPage(team: t, preLoadName: t.name),
                   ),
                 ),
-                onFavoriteTap: () => VToastOverlay.show(
-                  context,
-                  t.isFavorite
-                      ? 'Verwijderd uit favorieten'
-                      : 'Toegevoegd aan favorieten',
-                ),
+                onFavoriteTap: () async {
+                  final newStatus = await FavoritesService.toggleFavorite(t);
+                  setState(() {
+                    t.isFavorite = newStatus;
+                  });
+                  if (mounted) {
+                    VToastOverlay.show(
+                      context,
+                      newStatus
+                          ? 'Toegevoegd aan favorieten'
+                          : 'Verwijderd uit favorieten',
+                    );
+                  }
+                },
               ),
             ),
           ],
@@ -514,155 +801,545 @@ class RankingsPage extends StatefulWidget {
 }
 
 class _RankingsPageState extends State<RankingsPage> {
-  String _selectedLeague = 'VHP1';
+  List<TeamModel> _favoriteTeams = [];
+  TeamModel? _selectedFavoriteTeam;
+  bool _isLoadingLeagues = true;
+  bool _isLoadingRanking = false;
+  String? _error;
+  final List<String> _favTeamNames = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _initializeLeagues();
+    FavoritesService.favoritesNotifier.addListener(_onFavoritesChanged);
+    ThemeService.darkModeNotifier.addListener(_onThemeChanged);
+  }
+
+  @override
+  void dispose() {
+    FavoritesService.favoritesNotifier.removeListener(_onFavoritesChanged);
+    ThemeService.darkModeNotifier.removeListener(_onThemeChanged);
+    super.dispose();
+  }
+
+  void _onThemeChanged() {
+    if (mounted) setState(() {});
+  }
+
+  void _onFavoritesChanged() {
+    if (mounted) {
+      _initializeLeagues();
+    }
+  }
+
+  Future<void> _initializeLeagues() async {
+    setState(() {
+      _isLoadingLeagues = true;
+      _error = null;
+    });
+
+    try {
+      final favorites = await FavoritesService.loadFavorites();
+      if (favorites.isEmpty) {
+        setState(() {
+          _isLoadingLeagues = false;
+          _favoriteTeams = [];
+        });
+        return;
+      }
+
+      final Set<TeamModel> loadedFavs = {};
+      _favTeamNames.clear();
+
+      for (var team in favorites) {
+        // Ensure team is loaded to have league info and name
+        final fullTeam = await team.load();
+        loadedFavs.add(fullTeam);
+        _favTeamNames.add(fullTeam.name);
+      }
+
+      setState(() {
+        _favoriteTeams = loadedFavs.toList();
+
+        // Ensure the selected team is still in the list (or pick first)
+        if (_selectedFavoriteTeam == null ||
+            !loadedFavs.contains(_selectedFavoriteTeam)) {
+          _selectedFavoriteTeam = loadedFavs.isNotEmpty
+              ? loadedFavs.first
+              : null;
+        } else {
+          // Keep current selection instance from the new list
+          _selectedFavoriteTeam = loadedFavs.lookup(_selectedFavoriteTeam);
+        }
+
+        _isLoadingLeagues = false;
+
+        if (_selectedFavoriteTeam != null) {
+          _loadRanking();
+        }
+      });
+    } catch (e) {
+      setState(() {
+        _isLoadingLeagues = false;
+        _error = "Kon leagues niet laden: $e";
+      });
+    }
+  }
+
+  Future<void> _loadRanking({bool forceReload = false}) async {
+    if (_selectedFavoriteTeam == null) return;
+
+    setState(() {
+      _isLoadingRanking = true;
+      _error = null;
+    });
+
+    try {
+      // Re-load the team to get fresh ranking data if needed
+      await _selectedFavoriteTeam!.load(forceReload: forceReload);
+
+      setState(() {
+        _isLoadingRanking = false;
+      });
+    } catch (e) {
+      setState(() {
+        _isLoadingRanking = false;
+        _error = "Kon ranking niet laden: $e";
+      });
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
-    final ranking = StaticData.rankings[_selectedLeague] ?? [];
-    final favNames = ['Rotselaar A', 'Mendo Booischot B', 'Mendo Booischot A'];
+    if (_isLoadingLeagues) {
+      return const Center(
+        child: CircularProgressIndicator(color: accentYellow),
+      );
+    }
 
-    return ListView(
-      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-      children: [
-        Text('Ranking', style: VTextStyles.h2),
-        const SizedBox(height: 2),
-        const SizedBox(height: 16),
-        DropdownButtonFormField<String>(
-          initialValue: _selectedLeague,
-          dropdownColor: cardBg,
-          style: VTextStyles.body,
-          decoration: InputDecoration(
-            filled: true,
-            fillColor: cardBg,
-            border: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(10),
-              borderSide: const BorderSide(color: cardBorder),
-            ),
-            enabledBorder: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(10),
-              borderSide: const BorderSide(color: cardBorder),
-            ),
-            focusedBorder: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(10),
-              borderSide: const BorderSide(color: accentYellow),
-            ),
-            contentPadding: const EdgeInsets.symmetric(
-              horizontal: 14,
-              vertical: 10,
-            ),
-          ),
-          items: StaticData.leagueOptions
-              .map(
-                (l) => DropdownMenuItem<String>(
-                  value: l['id'] as String,
-                  child: Text(l['name'] as String, style: VTextStyles.body),
-                ),
-              )
-              .toList(),
-          onChanged: (v) => setState(() => _selectedLeague = v!),
+    if (_favoriteTeams.isEmpty) {
+      return Center(
+        child: VEmptyState(
+          icon: Icons.star_border,
+          title: 'Geen favorieten',
+          subtitle: 'Volg eerst teams om rankings te bekijken.',
+          actionLabel: 'Zoeken',
+          onActionTap: () {
+            // In the real app, we'd navigate to search.
+            _initializeLeagues();
+          },
         ),
-        const SizedBox(height: 16),
-        Container(
-          width: double.infinity,
-          padding: const EdgeInsets.symmetric(horizontal: 0, vertical: 0),
+      );
+    }
+
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
           child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const VRankingRow(
-                position: 0,
-                teamName: '',
-                wins: 0,
-                losses: 0,
-                setsWon: 0,
-                setsLost: 0,
-                points: 0,
-                isHeader: true,
-              ),
-              ...ranking.map(
-                (r) => VRankingRow(
-                  position: r['pos'],
-                  teamName: r['name'],
-                  wins: r['w'],
-                  losses: r['l'],
-                  setsWon: r['sw'],
-                  setsLost: r['sl'],
-                  points: r['pts'],
-                  isFavorite: favNames.any((fn) => r['name'].contains(fn)),
+              Text('Ranking', style: VTextStyles.h2),
+              const SizedBox(height: 16),
+              // Favorite Teams Dropdown
+              Text('MIJN TEAMS', style: VTextStyles.smallLabel),
+              const SizedBox(height: 8),
+              DropdownButtonFormField<TeamModel>(
+                initialValue: _selectedFavoriteTeam,
+                dropdownColor: cardBg,
+                style: VTextStyles.body,
+                decoration: InputDecoration(
+                  filled: true,
+                  fillColor: cardBg,
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(10),
+                    borderSide: BorderSide(color: cardBorder),
+                  ),
+                  enabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(10),
+                    borderSide: BorderSide(color: cardBorder),
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(10),
+                    borderSide: const BorderSide(color: accentYellow),
+                  ),
+                  contentPadding: const EdgeInsets.symmetric(
+                    horizontal: 14,
+                    vertical: 10,
+                  ),
                 ),
+                items: _favoriteTeams
+                    .map(
+                      (t) => DropdownMenuItem<TeamModel>(
+                        value: t,
+                        child: Text(
+                          t.name.isNotEmpty ? t.name : t.label,
+                          style: VTextStyles.body,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    )
+                    .toList(),
+                onChanged: (v) {
+                  if (v != null) {
+                    setState(() {
+                      _selectedFavoriteTeam = v;
+                    });
+                    _loadRanking();
+                  }
+                },
               ),
             ],
           ),
         ),
-        const SizedBox(height: 12),
-        Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Row(
-              mainAxisSize: MainAxisSize.min,
+        Expanded(child: _buildMainContent()),
+      ],
+    );
+  }
+
+  Widget _buildMainContent() {
+    if (_error != null) {
+      return Center(
+        child: VEmptyState(
+          icon: Icons.error_outline,
+          title: 'Fout bij laden',
+          subtitle: _error,
+          actionLabel: 'Opnieuw proberen',
+          onActionTap: _loadRanking,
+        ),
+      );
+    }
+
+    if (_selectedFavoriteTeam == null) {
+      return Center(
+        child: VEmptyState(
+          icon: Icons.info_outline,
+          title: 'Geen team geselecteerd',
+          subtitle: 'Selecteer een team om de ranking te bekijken.',
+          actionLabel: 'Vernieuwen',
+          onActionTap: _initializeLeagues,
+        ),
+      );
+    }
+
+    return RefreshIndicator(
+      onRefresh: () => _loadRanking(forceReload: true),
+      color: accentYellow,
+      backgroundColor: cardBg,
+      child: _buildRankingContent(),
+    );
+  }
+
+  Widget _buildRankingContent() {
+    if (_isLoadingRanking) {
+      return const Center(
+        child: CircularProgressIndicator(color: accentYellow),
+      );
+    }
+
+    final team = _selectedFavoriteTeam;
+    if (team == null) return const SizedBox.shrink();
+
+    final ranking = team.ranking;
+    final alert = team.rankingAlert;
+
+    return ListView(
+      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+      children: [
+        if (alert != null && alert.isNotEmpty)
+          Container(
+            padding: const EdgeInsets.all(12),
+            margin: const EdgeInsets.only(bottom: 16),
+            decoration: BoxDecoration(
+              color: accentYellow.withValues(
+                alpha: ThemeService.isDarkMode ? 0.1 : 0.15,
+              ),
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(
+                color: accentYellow.withValues(
+                  alpha: ThemeService.isDarkMode ? 0.3 : 0.5,
+                ),
+              ),
+            ),
+            child: Row(
               children: [
-                Container(
-                  width: 10,
-                  height: 10,
-                  decoration: BoxDecoration(
-                    color: accentYellow.withValues(alpha: 0.12),
-                    borderRadius: BorderRadius.circular(3),
-                    border: Border.all(color: accentYellow),
+                const Icon(Icons.info_outline, size: 16, color: accentYellow),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    alert,
+                    style: VTextStyles.captionBold.copyWith(color: alertGold),
                   ),
                 ),
-                const SizedBox(width: 4),
-                Text('Favoriet', style: VTextStyles.dateSmall),
               ],
             ),
-            const SizedBox(width: 16),
-            Text(
-              'W = Gewonnen · V = Verloren · S = Sets',
-              style: VTextStyles.dateSmall,
-            ),
-          ],
+          ),
+        Container(
+          width: double.infinity,
+          child: Column(
+            children: [
+              if (ranking.isNotEmpty)
+                const VRankingRow(
+                  position: '#',
+                  teamName: '',
+                  wins: 0,
+                  losses: 0,
+                  setsWon: 0,
+                  setsLost: 0,
+                  points: 0,
+                  isHeader: true,
+                ),
+              if (ranking.isEmpty && (alert == null || alert.isEmpty))
+                Padding(
+                  padding: const EdgeInsets.all(40),
+                  child: Column(
+                    children: [
+                      Icon(
+                        Icons.event_busy_outlined,
+                        size: 40,
+                        color: secondary.withValues(alpha: 0.5),
+                      ),
+                      const SizedBox(height: 12),
+                      Text(
+                        'Geen rangschikking gevonden',
+                        style: VTextStyles.bodyBold.copyWith(color: secondary),
+                        textAlign: TextAlign.center,
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        'Het seizoen is mogelijk nog niet gestart.',
+                        style: VTextStyles.caption,
+                        textAlign: TextAlign.center,
+                      ),
+                    ],
+                  ),
+                ),
+              ...ranking.map((r) {
+                final String teamName = r['team'] ?? '';
+                final int wins =
+                    (r['won_3_0_3_1'] as num? ?? 0).toInt() +
+                    (r['won_3_2'] as num? ?? 0).toInt();
+                final int losses =
+                    (r['lost_3_0_3_1'] as num? ?? 0).toInt() +
+                    (r['lost_3_2'] as num? ?? 0).toInt();
+
+                return VRankingRow(
+                  position: r['position']?.toString() ?? '',
+                  teamName: teamName,
+                  wins: wins,
+                  losses: losses,
+                  setsWon: (r['sets_won'] as num? ?? 0).toInt(),
+                  setsLost: (r['sets_lost'] as num? ?? 0).toInt(),
+                  points: (r['points'] as num? ?? 0).toInt(),
+                  isFavorite: _favTeamNames.contains(teamName),
+                );
+              }),
+            ],
+          ),
         ),
+        if (ranking.isNotEmpty) ...[
+          const SizedBox(height: 12),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    width: 10,
+                    height: 10,
+                    decoration: BoxDecoration(
+                      color: accentYellow.withValues(alpha: 0.12),
+                      borderRadius: BorderRadius.circular(3),
+                      border: Border.all(color: accentYellow),
+                    ),
+                  ),
+                  const SizedBox(width: 4),
+                  Text('Favoriet', style: VTextStyles.dateSmall),
+                ],
+              ),
+              const SizedBox(width: 16),
+              Text(
+                'W = Gewonnen · V = Verloren · S = Sets',
+                style: VTextStyles.dateSmall,
+              ),
+            ],
+          ),
+        ],
+        const SizedBox(height: 40), // Spacing for pull-to-refresh
       ],
     );
   }
 }
 
-class FavoritesPage extends StatelessWidget {
+class FavoritesPage extends StatefulWidget {
   const FavoritesPage({super.key});
 
   @override
+  State<FavoritesPage> createState() => _FavoritesPageState();
+}
+
+class _FavoritesPageState extends State<FavoritesPage> {
+  late Future<List<TeamModel>> _favoritesFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadFavorites();
+    FavoritesService.favoritesNotifier.addListener(_loadFavorites);
+  }
+
+  @override
+  void dispose() {
+    FavoritesService.favoritesNotifier.removeListener(_loadFavorites);
+    super.dispose();
+  }
+
+  void _loadFavorites() {
+    setState(() {
+      _favoritesFuture = FavoritesService.loadFavorites();
+    });
+  }
+
+  Map<String, dynamic>? _parseMatchDate(String dateStr) {
+    try {
+      final parts = dateStr.split('/');
+      if (parts.length != 3) return null;
+
+      final dagen = ['Ma', 'Di', 'Wo', 'Do', 'Vr', 'Za', 'Zo'];
+      final maanden = [
+        'jan',
+        'feb',
+        'mrt',
+        'apr',
+        'mei',
+        'jun',
+        'jul',
+        'aug',
+        'sep',
+        'okt',
+        'nov',
+        'dec',
+      ];
+
+      final d = DateTime(
+        int.parse(parts[2]),
+        int.parse(parts[1]),
+        int.parse(parts[0]),
+      );
+
+      return {
+        'day': dagen[d.weekday - 1],
+        'dayNum': d.day,
+        'month': maanden[d.month - 1],
+      };
+    } catch (e) {
+      return null;
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
-    return ListView(
-      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text('Favorieten', style: VTextStyles.h2),
-        const SizedBox(height: 2),
-        Text('Jouw gevolgde teams', style: VTextStyles.caption),
-        const SizedBox(height: 20),
-        ...StaticData.favoriteTeams.map(
-          (f) => Padding(
-            padding: const EdgeInsets.only(bottom: 10),
-            child: VFavoriteTeamCard(
-              teamName: f.name,
-              leagueName: f.leagueName,
-              clubName: f.club,
-              nextHomeTeam: f.nextHome,
-              nextAwayTeam: f.nextAway,
-              nextDateDay: f.nextDay,
-              nextDateDayNum: f.nextDayNum,
-              nextDateMonth: f.nextMonth,
-              nextTime: f.nextTime,
-              hasUpcomingMatch: f.nextHome != null,
-              // TODO: Complete on tap and favorite teams.
-              // onTap: () => Navigator.push(
-              //   context,
-              //   MaterialPageRoute(
-              //     builder: (_) => TeamDetailPage(
-              //       teamName: f.name,
-              //       leagueName: f.leagueName,
-              //     ),
-              //   ),
-              // ),
-              onRemoveTap: () =>
-                  VToastOverlay.show(context, 'Verwijderd uit favorieten'),
-            ),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('Favorieten', style: VTextStyles.h2),
+              const SizedBox(height: 2),
+              Text('Je gevolgde teams', style: VTextStyles.caption),
+            ],
+          ),
+        ),
+        Expanded(
+          child: FutureBuilder<List<TeamModel>>(
+            future: _favoritesFuture,
+            builder: (context, snapshot) {
+              if (snapshot.connectionState == ConnectionState.waiting) {
+                return const Center(child: CircularProgressIndicator());
+              }
+
+              final favorites = snapshot.data ?? [];
+
+              if (favorites.isEmpty) {
+                return const VEmptyState(
+                  icon: Icons.star_border,
+                  title: 'Geen favorieten',
+                  subtitle:
+                      'Voeg teams toe aan je favorieten om ze hier te bekijken.',
+                );
+              }
+
+              return ListView.builder(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 20,
+                  vertical: 8,
+                ),
+                itemCount: favorites.length,
+                itemBuilder: (context, index) {
+                  final savedTeam = favorites[index];
+
+                  return FutureBuilder<TeamModel>(
+                    future: savedTeam.load(),
+                    builder: (context, teamSnapshot) {
+                      if (!teamSnapshot.hasData) {
+                        return const Padding(
+                          padding: EdgeInsets.only(bottom: 12),
+                          child: VClubTeamRow.loading(),
+                        );
+                      }
+
+                      final fullTeam = teamSnapshot.data!;
+                      final hasMatch = fullTeam.games.isNotEmpty;
+                      final nextMatch = hasMatch ? fullTeam.games.first : null;
+                      final dateParts = nextMatch != null
+                          ? _parseMatchDate(nextMatch.date)
+                          : null;
+
+                      return Padding(
+                        padding: const EdgeInsets.only(bottom: 12),
+                        child: VFavoriteTeamCard(
+                          teamName: fullTeam.name,
+                          leagueName: fullTeam.leagueName,
+                          hasUpcomingMatch: hasMatch,
+                          nextHomeTeam: nextMatch?.homeTeam.name,
+                          nextAwayTeam: nextMatch?.awayTeam.name,
+                          nextTime: nextMatch?.time,
+                          nextDateDay: dateParts?['day'],
+                          nextDateDayNum: dateParts?['dayNum'],
+                          nextDateMonth: dateParts?['month'],
+                          onTap: () => Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (_) => TeamDetailPage(
+                                team: fullTeam,
+                                preLoadName: fullTeam.name,
+                              ),
+                            ),
+                          ),
+                          onRemoveTap: () async {
+                            await FavoritesService.removeFavorite(
+                              fullTeam.teamId,
+                            );
+                            _loadFavorites();
+                            if (context.mounted) {
+                              VToastOverlay.show(
+                                context,
+                                'Team verwijderd uit favorieten',
+                              );
+                            }
+                          },
+                        ),
+                      );
+                    },
+                  );
+                },
+              );
+            },
           ),
         ),
       ],
@@ -670,8 +1347,81 @@ class FavoritesPage extends StatelessWidget {
   }
 }
 
-class MorePage extends StatelessWidget {
+class MorePage extends StatefulWidget {
   const MorePage({super.key});
+
+  @override
+  State<MorePage> createState() => _MorePageState();
+}
+
+class _MorePageState extends State<MorePage> {
+  bool _notificationsEnabled = false;
+  TimeOfDay _notificationTime = const TimeOfDay(hour: 8, minute: 0);
+  int _favCount = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadSettings();
+  }
+
+  Future<void> _loadSettings() async {
+    final enabled = await FavoritesService.areNotificationsEnabled();
+    final time = await FavoritesService.getNotificationTime();
+    final favs = await FavoritesService.loadFavorites();
+    if (mounted) {
+      setState(() {
+        _notificationsEnabled = enabled;
+        _notificationTime = time;
+        _favCount = favs.length;
+      });
+    }
+  }
+
+  Future<void> _toggleNotifications(bool value) async {
+    await FavoritesService.setNotificationsEnabled(value);
+    setState(() => _notificationsEnabled = value);
+    if (value) {
+      // Trigger a re-load to schedule notifications
+      FavoritesService.preloadFavorites();
+    } else {
+      await NotificationService.cancelAll();
+    }
+  }
+
+  Future<void> _toggleDarkMode(bool value) async {
+    await ThemeService.setDarkMode(value);
+    setState(
+      () => _notificationsEnabled = _notificationsEnabled,
+    ); // Trigger rebuild for toggle switch visual
+  }
+
+  Future<void> _pickTime() async {
+    final picked = await showTimePicker(
+      context: context,
+      initialTime: _notificationTime,
+      builder: (context, child) {
+        return Theme(
+          data: ThemeData.dark().copyWith(
+            colorScheme: ColorScheme.dark(
+              primary: accentYellow,
+              onPrimary: primary,
+              surface: cardBg,
+              onSurface: light,
+            ),
+          ),
+          child: child!,
+        );
+      },
+    );
+
+    if (picked != null) {
+      await FavoritesService.setNotificationTime(picked);
+      setState(() => _notificationTime = picked);
+      // Trigger a re-load to reschedule notifications
+      FavoritesService.preloadFavorites();
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -684,7 +1434,7 @@ class MorePage extends StatelessWidget {
         // Profiel
         Container(
           decoration: BoxDecoration(
-            gradient: const LinearGradient(
+            gradient: LinearGradient(
               begin: Alignment.topLeft,
               end: Alignment.bottomRight,
               colors: [cardBg, cardBgAlt],
@@ -702,7 +1452,7 @@ class MorePage extends StatelessWidget {
                   color: accentYellow,
                   borderRadius: BorderRadius.circular(14),
                 ),
-                child: const Icon(Icons.person, size: 22, color: primary),
+                child: Icon(Icons.person, size: 22, color: primary),
               ),
               const SizedBox(width: 14),
               Column(
@@ -713,7 +1463,10 @@ class MorePage extends StatelessWidget {
                     style: VTextStyles.bodyBold.copyWith(fontSize: 16),
                   ),
                   const SizedBox(height: 2),
-                  Text('3 teams gevolgd', style: VTextStyles.bodySecondary),
+                  Text(
+                    '$_favCount teams gevolgd',
+                    style: VTextStyles.bodySecondary,
+                  ),
                 ],
               ),
             ],
@@ -723,41 +1476,37 @@ class MorePage extends StatelessWidget {
 
         // Instellingen
         VSettingsRow(
-          icon: Icons.star,
-          iconBgColor: accentYellow.withValues(alpha: 0.12),
-          iconColor: accentYellow,
-          title: 'Mijn Favorieten',
-          subtitle: 'Beheer gevolgde teams',
-        ),
-        VSettingsRow(
           icon: Icons.notifications_outlined,
           iconBgColor: accentRed.withValues(alpha: 0.12),
           iconColor: accentRed,
           title: 'Notificaties',
-          subtitle: 'Wedstrijdherinneringen',
-          trailing: const VToggleSwitch(isOn: true),
-          onTap: () =>
-              VToastOverlay.show(context, 'Notificaties zijn ingeschakeld'),
+          subtitle: 'Dagelijks overzicht van wedstrijden',
+          trailing: VToggleSwitch(isOn: _notificationsEnabled),
+          onTap: () => _toggleNotifications(!_notificationsEnabled),
         ),
+        if (_notificationsEnabled)
+          VSettingsRow(
+            icon: Icons.access_time_rounded,
+            iconBgColor: accentYellow.withValues(
+              alpha: ThemeService.isDarkMode ? 0.12 : 0.2,
+            ),
+            iconColor: accentYellow,
+            title: 'Tijdstip melding',
+            subtitle:
+                'Ontvang het overzicht om ${_notificationTime.format(context)}',
+            onTap: _pickTime,
+          ),
         VSettingsRow(
           icon: Icons.dark_mode_outlined,
-          iconBgColor: const Color(0xFF3498DB).withValues(alpha: 0.12),
-          iconColor: const Color(0xFF3498DB),
+          iconBgColor: blueInfo.withValues(alpha: 0.12),
+          iconColor: blueInfo,
           title: 'Donkere Modus',
-          subtitle: 'Altijd aan',
-          trailing: const VToggleSwitch(isOn: true),
-          onTap: () => VToastOverlay.show(
-            context,
-            'Donkere modus is standaard ingeschakeld',
+          subtitle: ThemeService.isDarkMode ? 'Altijd aan' : 'Uitgeschakeld',
+          trailing: VToggleSwitch(
+            isOn: ThemeService.isDarkMode,
+            onChanged: _toggleDarkMode,
           ),
-        ),
-        VSettingsRow(
-          icon: Icons.language,
-          iconBgColor: const Color(0xFF9B59B6).withValues(alpha: 0.12),
-          iconColor: const Color(0xFF9B59B6),
-          title: 'Taal',
-          subtitle: 'Nederlands',
-          onTap: () => VToastOverlay.show(context, 'Taal: Nederlands'),
+          onTap: () => _toggleDarkMode(!ThemeService.isDarkMode),
         ),
         const SizedBox(height: 24),
 
@@ -776,11 +1525,21 @@ class MorePage extends StatelessWidget {
                 style: VTextStyles.h3.copyWith(color: accentYellow),
               ),
               const SizedBox(height: 4),
-              Text('All Belgian Volleyball Stats', style: VTextStyles.caption),
+              Text('Flemish Volleyball Stats', style: VTextStyles.caption),
+              const SizedBox(height: 8),
+              Text(
+                'Data provided by Volleyscores. Data is as is.',
+                style: VTextStyles.dateSmall,
+                textAlign: TextAlign.center,
+              ),
               const SizedBox(height: 14),
               GestureDetector(
-                onTap: () =>
-                    VToastOverlay.show(context, 'Opent volleyscores.be'),
+                onTap: () async {
+                  final uri = Uri.parse('https://volleyscores.be');
+                  if (await canLaunchUrl(uri)) {
+                    await launchUrl(uri, mode: LaunchMode.externalApplication);
+                  }
+                },
                 child: Container(
                   padding: const EdgeInsets.symmetric(
                     horizontal: 16,
@@ -807,18 +1566,26 @@ class MorePage extends StatelessWidget {
               ),
               const SizedBox(height: 14),
               Text(
-                'Versie 1.0.0 · Koninklijk Belgisch Volleybalverbond',
+                'Versie 0.0.1 · Made with ❤️ by Sander Pelgrims',
                 style: VTextStyles.dateSmall,
               ),
               const SizedBox(height: 10),
               Row(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  _socialIcon(Icons.camera_alt_outlined, 'Instagram'),
+                  _socialIcon(Icons.language, 'Website', 'https://sqnder.dev'),
                   const SizedBox(width: 16),
-                  _socialIcon(Icons.language, 'X/Twitter'),
+                  _socialIcon(
+                    Icons.camera_alt_outlined,
+                    'Instagram',
+                    'https://instagram.com/sander_pelgrims',
+                  ),
                   const SizedBox(width: 16),
-                  _socialIcon(Icons.facebook, 'Facebook'),
+                  _socialIcon(
+                    Icons.link,
+                    'LinkedIn',
+                    'https://linkedin.com/in/sanderpelgrims',
+                  ),
                 ],
               ),
             ],
@@ -828,11 +1595,16 @@ class MorePage extends StatelessWidget {
     );
   }
 
-  Widget _socialIcon(IconData icon, String name) {
+  Widget _socialIcon(IconData icon, String name, String url) {
     return Builder(
       builder: (context) {
         return GestureDetector(
-          onTap: () => VToastOverlay.show(context, 'Volg ons op $name'),
+          onTap: () async {
+            final uri = Uri.parse(url);
+            if (await canLaunchUrl(uri)) {
+              await launchUrl(uri, mode: LaunchMode.externalApplication);
+            }
+          },
           child: Container(
             width: 28,
             height: 28,
@@ -882,14 +1654,14 @@ class _ClubDetailPageState extends State<ClubDetailPage> {
               color: cardBg,
               borderRadius: BorderRadius.circular(10),
             ),
-            child: const Icon(Icons.chevron_left, color: light, size: 16),
+            child: Icon(Icons.chevron_left, color: light, size: 16),
           ),
         ),
         title: FutureBuilder(
           future: _clubFuture,
           builder: (context, snapshot) {
             if (snapshot.connectionState == ConnectionState.waiting) {
-              return const Text(
+              return Text(
                 "Loading...",
                 style: VTextStyles.h3,
                 maxLines: 1,
@@ -900,13 +1672,13 @@ class _ClubDetailPageState extends State<ClubDetailPage> {
             if (snapshot.hasError) {
               debugPrint("CLUB FUTURE ERROR: ${snapshot.error}");
               debugPrintStack(stackTrace: snapshot.stackTrace);
-              return const Text("Error", style: VTextStyles.h3);
+              return Text("Error", style: VTextStyles.h3);
             }
 
             final club = snapshot.data;
 
             if (club == null) {
-              return const Text("No data", style: VTextStyles.h3);
+              return Text("No data", style: VTextStyles.h3);
             }
 
             return Text(
@@ -922,8 +1694,35 @@ class _ClubDetailPageState extends State<ClubDetailPage> {
       body: FutureBuilder<ClubModel>(
         future: _clubFuture,
         builder: (context, snapshot) {
+          if (snapshot.hasError) {
+            final error = snapshot.error;
+            bool isOffline = false;
+            if (error is SocketException ||
+                error.toString().contains('Failed host lookup')) {
+              isOffline = true;
+            }
+
+            return Center(
+              child: VEmptyState(
+                icon: isOffline ? Icons.wifi_off_rounded : Icons.error_outline,
+                title: isOffline ? 'Je bent offline' : 'Fout bij laden',
+                subtitle: isOffline
+                    ? 'Controleer je verbinding om de clubgegevens te bekijken.'
+                    : 'We konden de clubgegevens niet ophalen.',
+                actionLabel: 'Opnieuw proberen',
+                onActionTap: () {
+                  setState(() {
+                    _clubFuture = widget.club.load();
+                  });
+                },
+              ),
+            );
+          }
+
           if (!snapshot.hasData) {
-            return const Center(child: CircularProgressIndicator());
+            return const Center(
+              child: CircularProgressIndicator(color: accentYellow),
+            );
           }
 
           final club = snapshot.data!;
@@ -988,11 +1787,32 @@ class _ClubDetailPageState extends State<ClubDetailPage> {
                   key: ValueKey('${_isCompetitionTab}_${team.teamId}'),
                   future: cachedTeam != null
                       ? Future.value(cachedTeam)
-                      : team.load().then((loaded) {
+                      : team.load().then((loaded) async {
+                          loaded.isFavorite = await FavoritesService.isFavorite(
+                            loaded.teamId,
+                          );
                           _loadedTeams[loaded.teamId] = loaded;
                           return loaded;
                         }),
                   builder: (context, snapshot) {
+                    if (snapshot.hasError) {
+                      debugPrint(
+                        'Error loading team ${team.teamId}: ${snapshot.error}',
+                      );
+                      return Padding(
+                        padding: const EdgeInsets.only(bottom: 8),
+                        child: VClubTeamRow(
+                          teamName: 'Fout bij laden',
+                          seriesLabel: team.label,
+                          onTap: () {
+                            setState(() {
+                              _loadedTeams.remove(team.teamId);
+                            });
+                          },
+                        ),
+                      );
+                    }
+
                     if (!snapshot.hasData) {
                       return const Padding(
                         padding: EdgeInsets.only(bottom: 8),
@@ -1000,12 +1820,12 @@ class _ClubDetailPageState extends State<ClubDetailPage> {
                       );
                     }
 
-                    final team = snapshot.data!;
+                    final loadedTeam = snapshot.data!;
                     var nextMatchString = "Geen volgende wedstrijd";
                     String? venue;
 
-                    if (team.games.isNotEmpty) {
-                      GameModel nextMatch = team.games.first;
+                    if (loadedTeam.games.isNotEmpty) {
+                      GameModel nextMatch = loadedTeam.games.first;
                       venue = nextMatch.venue;
                       int last = nextMatch.date.length;
 
@@ -1019,28 +1839,37 @@ class _ClubDetailPageState extends State<ClubDetailPage> {
                           "${nextMatch.awayTeam.name}";
                     }
 
+                    // Removed debug prints
+
                     return Padding(
                       padding: const EdgeInsets.only(bottom: 8),
                       child: VClubTeamRow(
-                        teamName: team.name,
-                        seriesLabel: team.leagueName,
+                        teamName: loadedTeam.name,
+                        seriesLabel: loadedTeam.leagueName,
                         nextMatch: nextMatchString,
                         venue: venue,
-                        isFavorite: team.isFavorite,
+                        isFavorite: loadedTeam.isFavorite,
                         onTap: () => Navigator.push(
                           context,
                           MaterialPageRoute(
                             builder: (_) => TeamDetailPage(
-                              team: team,
-                              preLoadName: team.name,
+                              team: loadedTeam,
+                              preLoadName: loadedTeam.name,
                             ),
                           ),
                         ),
-                        onFavoriteTap: () {
-                          VToastOverlay.show(
-                            context,
-                            team.isFavorite ? 'Verwijderd' : 'Toegevoegd',
-                          );
+                        onFavoriteTap: () async {
+                          final newStatus =
+                              await FavoritesService.toggleFavorite(loadedTeam);
+                          setState(() {
+                            loadedTeam.isFavorite = newStatus;
+                          });
+                          if (mounted) {
+                            VToastOverlay.show(
+                              context,
+                              newStatus ? 'Toegevoegd' : 'Verwijderd',
+                            );
+                          }
                         },
                       ),
                     );
@@ -1067,31 +1896,70 @@ class TeamDetailPage extends StatefulWidget {
 
 class _TeamDetailPageState extends State<TeamDetailPage> {
   late Future<TeamModel> _teamFuture;
+  bool _isFavorite = false;
 
   @override
   void initState() {
     super.initState();
     _teamFuture = widget.team.load();
+    _checkFavorite();
+  }
+
+  Future<void> _checkFavorite() async {
+    final isFav = await FavoritesService.isFavorite(widget.team.teamId);
+    if (mounted) {
+      setState(() {
+        _isFavorite = isFav;
+      });
+    }
+  }
+
+  Future<void> _downloadAndOpenCalendar(
+    BuildContext context,
+    String url,
+    String teamName,
+  ) async {
+    VToastOverlay.show(context, 'Agenda downloaden...');
+
+    try {
+      final response = await http
+          .get(Uri.parse(url))
+          .timeout(const Duration(seconds: 15));
+
+      if (response.statusCode == 200) {
+        final tempDir = await getTemporaryDirectory();
+        // Create a safe filename
+        final safeName = teamName.replaceAll(RegExp(r'[^\w\s-]'), '').trim();
+        final filePath = '${tempDir.path}/$safeName.ics';
+        final file = File(filePath);
+
+        await file.writeAsBytes(response.bodyBytes);
+
+        final result = await OpenFilex.open(filePath, type: 'application/ics');
+        if (result.type != ResultType.done) {
+          if (context.mounted) {
+            VToastOverlay.show(context, 'Kon agenda bestand niet openen');
+          }
+        }
+      } else {
+        if (context.mounted) {
+          VToastOverlay.show(
+            context,
+            'Download mislukt: ${response.statusCode}',
+          );
+        }
+      }
+    } catch (e) {
+      debugPrint('Error syncing calendar: $e');
+      if (context.mounted) {
+        VToastOverlay.show(context, 'Fout bij het openen van de agenda');
+      }
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     final String preLoadName = widget.preLoadName;
-
-    final maanden = [
-      'januari',
-      'februari',
-      'maart',
-      'april',
-      'mei',
-      'juni',
-      'juli',
-      'augustus',
-      'september',
-      'oktober',
-      'november',
-      'december',
-    ];
 
     return Scaffold(
       backgroundColor: primary,
@@ -1106,7 +1974,7 @@ class _TeamDetailPageState extends State<TeamDetailPage> {
               color: cardBg,
               borderRadius: BorderRadius.circular(10),
             ),
-            child: const Icon(Icons.chevron_left, color: light, size: 16),
+            child: Icon(Icons.chevron_left, color: light, size: 16),
           ),
         ),
         title: FutureBuilder(
@@ -1133,9 +2001,54 @@ class _TeamDetailPageState extends State<TeamDetailPage> {
           Padding(
             padding: const EdgeInsets.only(right: 16),
             child: GestureDetector(
-              onTap: () => VToastOverlay.show(context, 'Favoriet aangepast'),
-              child: const Icon(Icons.star, size: 18, color: accentYellow),
+              onTap: () async {
+                final newStatus = await FavoritesService.toggleFavorite(
+                  widget.team,
+                );
+                setState(() {
+                  _isFavorite = newStatus;
+                });
+                if (mounted) {
+                  VToastOverlay.show(
+                    context,
+                    newStatus
+                        ? 'Toegevoegd aan favorieten'
+                        : 'Verwijderd uit favorieten',
+                  );
+                }
+              },
+              child: Icon(
+                _isFavorite ? Icons.star : Icons.star_border,
+                size: 18,
+                color: accentYellow,
+              ),
             ),
+          ),
+          FutureBuilder<TeamModel>(
+            future: _teamFuture,
+            builder: (context, snapshot) {
+              final team = snapshot.data;
+              if (team == null ||
+                  team.calendarUrl == null ||
+                  team.calendarUrl!.isEmpty) {
+                return const SizedBox.shrink();
+              }
+              return Padding(
+                padding: const EdgeInsets.only(right: 16),
+                child: GestureDetector(
+                  onTap: () => _downloadAndOpenCalendar(
+                    context,
+                    team.calendarUrl!,
+                    team.name,
+                  ),
+                  child: const Icon(
+                    Icons.calendar_today_rounded,
+                    size: 18,
+                    color: accentYellow,
+                  ),
+                ),
+              );
+            },
           ),
         ],
       ),
@@ -1143,18 +2056,22 @@ class _TeamDetailPageState extends State<TeamDetailPage> {
         future: _teamFuture,
         builder: (context, snapshot) {
           if (snapshot.connectionState == ConnectionState.waiting) {
-            return const VEmptyState(
-              icon: Icons.calendar_month_outlined,
-              title: 'Wedstrijden laden',
-              subtitle: 'Even geduld, we halen de wedstrijden op...',
+            return Center(
+              child: VEmptyState(
+                icon: Icons.calendar_month_outlined,
+                title: 'Wedstrijden laden',
+                subtitle: 'Even geduld, we halen de wedstrijden op...',
+              ),
             );
           }
 
           if (!snapshot.hasData || snapshot.data!.games.isEmpty) {
-            return const VEmptyState(
-              icon: Icons.calendar_month_outlined,
-              title: 'Geen wedstrijden beschikbaar',
-              subtitle: 'De wedstrijdata worden binnenkort bekendgemaakt.',
+            return Center(
+              child: VEmptyState(
+                icon: Icons.calendar_month_outlined,
+                title: 'Geen wedstrijden beschikbaar',
+                subtitle: 'De wedstrijdata worden binnenkort bekendgemaakt.',
+              ),
             );
           }
 
@@ -1198,48 +2115,95 @@ class _TeamDetailPageState extends State<TeamDetailPage> {
 
           final sections = grouped.entries.toList();
 
-          return ListView.builder(
+          return ListView(
             padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
-            itemCount: sections.length,
-            itemBuilder: (context, index) {
-              final section = sections[index];
-              final matches = section.value['matches'] as List<GameModel>;
+            children: [
+              if (team.calendarUrl != null && team.calendarUrl!.isNotEmpty)
+                _buildCalendarSyncCard(context, team.calendarUrl!, team.name),
+              ...sections.map((section) {
+                final matches = section.value['matches'] as List<GameModel>;
 
-              return Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  VDateDivider(label: section.value['label'] as String),
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    VDateDivider(label: section.value['label'] as String),
+                    ...matches.map((m) {
+                      final parts = m.date.split('/');
+                      final day = int.parse(parts[0]);
+                      final month = int.parse(parts[1]);
+                      final year = int.parse(parts[2]);
 
-                  ...matches.map((m) {
-                    final parts = m.date.split('/');
-                    final day = int.parse(parts[0]);
-                    final month = int.parse(parts[1]);
-                    final year = int.parse(parts[2]);
+                      final date = DateTime(year, month, day);
 
-                    final date = DateTime(year, month, day);
-
-                    return Padding(
-                      padding: const EdgeInsets.only(bottom: 8),
-                      child: VTeamDetailMatchCard(
-                        homeTeam: m.homeTeam.name,
-                        awayTeam: m.awayTeam.name,
-                        result: m.result,
-                        venue: m.venue,
-                        dateDay: dagen[date.weekday % 7],
-                        dateNum: day,
-                        dateMonth: maanden[month - 1].substring(0, 3),
-                        timeString: m.time,
-                        isHomeTeam: m.homeTeam.name.contains(
-                          team.name.split(' ').last,
+                      return Padding(
+                        padding: const EdgeInsets.only(bottom: 8),
+                        child: VTeamDetailMatchCard(
+                          homeTeam: m.homeTeam.name,
+                          awayTeam: m.awayTeam.name,
+                          result: m.result,
+                          venue: m.venue,
+                          dateDay: dagen[date.weekday % 7],
+                          dateNum: day,
+                          dateMonth: maanden[month - 1].substring(0, 3),
+                          timeString: m.time,
+                          isHomeTeam: m.homeTeam.name.contains(
+                            team.name.split(' ').last,
+                          ),
                         ),
-                      ),
-                    );
-                  }),
-                ],
-              );
-            },
+                      );
+                    }),
+                  ],
+                );
+              }),
+            ],
           );
         },
+      ),
+    );
+  }
+
+  Widget _buildCalendarSyncCard(
+    BuildContext context,
+    String url,
+    String teamName,
+  ) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 20),
+      decoration: BoxDecoration(
+        color: cardBgAlt,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: cardBorder),
+      ),
+      child: Material(
+        color: Colors.transparent,
+        child: ListTile(
+          onTap: () => _downloadAndOpenCalendar(context, url, teamName),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+          ),
+          leading: Container(
+            width: 38,
+            height: 38,
+            decoration: BoxDecoration(
+              color: accentYellow.withValues(alpha: 0.12),
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: const Icon(
+              Icons.calendar_month_rounded,
+              color: accentYellow,
+              size: 20,
+            ),
+          ),
+          title: Text(
+            'Team Agenda Synchroniseren',
+            style: VTextStyles.bodyBold,
+          ),
+          subtitle: Text(
+            'Voeg alle wedstrijden toe aan je agenda',
+            style: VTextStyles.caption,
+          ),
+          trailing: Icon(Icons.chevron_right, size: 16, color: secondary),
+        ),
       ),
     );
   }
@@ -1279,7 +2243,7 @@ class ClubModel {
       name: json['name'] ?? '',
       code: json['club_code'] ?? '',
       label: json['label'] ?? '',
-      clubId: json['club_id']?.toString() ?? '',
+      clubId: (json['club_id'] ?? json['id'])?.toString() ?? '',
 
       chairman: general['Voorzitter']?.toString() ?? '',
       secretary: general['Secretaris']?.toString() ?? '',
@@ -1287,20 +2251,54 @@ class ClubModel {
 
       compTeams:
           (json['competition_teams'] as List?)?.map((m) {
-            String leagueCode = m["series"].split(" ").last;
-            String teamLabel = "$leagueCode ${m['team']}";
-            return TeamModel(label: teamLabel, teamId: m["id"].toString());
+            final String series = m["series"]?.toString() ?? '';
+            String leagueCode = '';
+            if (series.isNotEmpty) {
+              final parts = series.split(" ");
+              if (parts.isNotEmpty) leagueCode = parts.last;
+            }
+            String teamLabel = "${m['team'] ?? ''} ($leagueCode)";
+            final teamId =
+                (m["id"] ?? m["team_id"] ?? m["teamid"])?.toString() ?? '';
+            return TeamModel(label: teamLabel, teamId: teamId);
           }).toList() ??
           [],
 
       cupTeams:
           (json['cup_teams'] as List?)?.map((m) {
-            String leagueCode = m["series"].split(" ").last;
-            String teamLabel = "$leagueCode ${m['team']}";
-            return TeamModel(label: teamLabel, teamId: m["id"].toString());
+            final String series = m["series"]?.toString() ?? '';
+            String leagueCode = '';
+            if (series.isNotEmpty) {
+              final parts = series.split(" ");
+              if (parts.isNotEmpty) leagueCode = parts.last;
+            }
+            String teamLabel = "${m['team'] ?? ''} ($leagueCode)";
+            final teamId =
+                (m["id"] ?? m["team_id"] ?? m["teamid"])?.toString() ?? '';
+            return TeamModel(label: teamLabel, teamId: teamId);
           }).toList() ??
           [],
     );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'name': name,
+      'club_code': code,
+      'label': label,
+      'club_id': clubId,
+      'general': {
+        'Voorzitter': chairman,
+        'Secretaris': secretary,
+        'Website': website,
+      },
+      'competition_teams': compTeams
+          .map((t) => {'team': t.name, 'id': t.teamId, 'series': t.leagueName})
+          .toList(),
+      'cup_teams': cupTeams
+          .map((t) => {'team': t.name, 'id': t.teamId, 'series': t.leagueName})
+          .toList(),
+    };
   }
 
   Future<ClubModel> load() async {
@@ -1312,18 +2310,47 @@ class ClubModel {
     final uri = Uri.parse(
       '${apiBaseUrl}api/get/club?club_label=$label&club_id=$clubId',
     );
-    final response = await http.get(uri);
+    try {
+      final response = await http.get(uri);
 
-    if (response.statusCode != 200) {
-      debugPrint('API Error: ${response.statusCode} - ${response.body}');
-      throw Exception('API Error: ${response.statusCode} - ${response.body}');
+      if (response.statusCode != 200) {
+        debugPrint('API Error: ${response.statusCode} - ${response.body}');
+        throw Exception('API Error: ${response.statusCode} - ${response.body}');
+      }
+      final data = jsonDecode(response.body);
+      final club = ClubModel.fromJson(data);
+
+      _clubCache[key] = club;
+
+      // Cache management: Keep only last 50 entries
+      if (_clubCache.length > 50) {
+        _clubCache.remove(_clubCache.keys.first);
+      }
+
+      // Throttled persist
+      _persistClubsThrottled();
+      return club;
+    } catch (e) {
+      debugPrint('ClubModel.load failed for $clubId: $e');
+      if (_clubCache.containsKey(key)) {
+        return _clubCache[key]!;
+      }
+      rethrow;
     }
-    final data = jsonDecode(response.body);
-    final club = ClubModel.fromJson(data);
-
-    _clubCache[key] = club;
-    return club;
   }
+}
+
+Timer? _clubsPersistTimer;
+void _persistClubsThrottled() {
+  _clubsPersistTimer?.cancel();
+  _clubsPersistTimer = Timer(const Duration(seconds: 2), () async {
+    final Map<String, dynamic> jsonMap = {};
+    _clubCache.forEach((key, value) {
+      jsonMap[key] = value.toJson();
+    });
+    await PersistenceService.saveClubs(jsonMap);
+    debugPrint('Clubs persisted to disk');
+  });
 }
 
 class TeamModel {
@@ -1333,16 +2360,22 @@ class TeamModel {
   final String teamId;
   final String leagueId;
   final List<GameModel> games;
+  final List<dynamic> ranking;
+  final String? rankingAlert;
+  final String? calendarUrl;
   final bool isLoaded;
-  final bool isFavorite;
+  bool isFavorite;
 
-  const TeamModel({
+  TeamModel({
     required this.label,
     required this.teamId,
     this.name = '',
     this.leagueName = '',
     this.leagueId = '',
     this.games = const [],
+    this.ranking = const [],
+    this.rankingAlert,
+    this.calendarUrl,
     this.isLoaded = false,
     this.isFavorite = false,
   });
@@ -1351,7 +2384,7 @@ class TeamModel {
     Map<String, dynamic> json, {
     bool isLoaded = false,
   }) {
-    final label = json['label'] ?? '';
+    final label = json['label'] ?? json['team'] ?? '';
     final match = RegExp(r'\(([^)]+)\)').firstMatch(label);
     final leagueIdRaw = match?.group(1) ?? '';
     final games =
@@ -1360,14 +2393,51 @@ class TeamModel {
             .toList() ??
         [];
 
+    String name = json['name']?.toString() ?? '';
+    if (name.isEmpty) {
+      name = label.replaceFirst(RegExp(r'\([^)]+\)'), '').trim();
+    }
+    if (name.isEmpty) name = label;
+
+    List<dynamic> ranking = [];
+    String? alert;
+
+    final rawRanking = json['ranking'];
+    if (rawRanking is List) {
+      if (rawRanking.length == 2 &&
+          rawRanking[0] is List &&
+          rawRanking[1] is String) {
+        ranking = rawRanking[0];
+        alert = rawRanking[1];
+      } else {
+        ranking = rawRanking;
+      }
+    }
+
     return TeamModel(
       label: label,
-      teamId: json['team_id']?.toString() ?? '',
-      name: json['name'] ?? '',
+      teamId: (json['team_id'] ?? json['id'])?.toString() ?? '',
+      name: name,
       leagueName: json['league'] ?? leagueIdRaw,
       leagueId: leagueIdRaw,
       games: games,
+      ranking: ranking,
+      rankingAlert: alert,
+      calendarUrl: json['calendar']?.toString(),
+      isLoaded: isLoaded,
     );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'label': label,
+      'team_id': teamId,
+      'name': name,
+      'league': leagueName,
+      'matches': games.map((g) => g.toJson()).toList(),
+      'ranking': rankingAlert != null ? [ranking, rankingAlert] : ranking,
+      'calendar': calendarUrl,
+    };
   }
 
   Future<TeamModel> load({bool forceReload = false}) async {
@@ -1380,19 +2450,41 @@ class TeamModel {
     final uri = Uri.parse(
       '${apiBaseUrl}api/get/team?label=${_cleanLabel()}&team_id=$teamId',
     );
-    final response = await http.get(uri).timeout(const Duration(seconds: 10));
+    debugPrint('TeamModel.load URI: $uri');
+    try {
+      final response = await http.get(uri).timeout(const Duration(seconds: 10));
 
-    if (response.statusCode != 200) {
-      debugPrint('API Error: ${response.statusCode} - ${response.body}');
-      throw Exception('API Error: ${response.statusCode} - ${response.body}');
+      if (response.statusCode != 200) {
+        debugPrint('API Error: ${response.statusCode} - ${response.body}');
+        throw Exception('API Error: ${response.statusCode} - ${response.body}');
+      }
+
+      final data = jsonDecode(response.body) as Map<String, dynamic>;
+      // Preserve existing info if missing in the details response
+      data.putIfAbsent('team_id', () => teamId);
+      data.putIfAbsent('label', () => label);
+
+      final team = TeamModel.fromJson(data, isLoaded: true);
+
+      _teamCache[key] = team;
+
+      // Cache management: Keep only last 100 teams
+      if (_teamCache.length > 100) {
+        _teamCache.remove(_teamCache.keys.first);
+      }
+
+      // Throttled persist
+      _persistTeamsThrottled();
+
+      return team;
+    } catch (e) {
+      debugPrint('TeamModel.load failed for $teamId: $e');
+      // If we have any cached data, return it as a fallback when offline
+      if (_teamCache.containsKey(key)) {
+        return _teamCache[key]!;
+      }
+      rethrow;
     }
-
-    final data = jsonDecode(response.body);
-    final team = TeamModel.fromJson(data, isLoaded: true);
-
-    _teamCache[key] = team;
-
-    return team;
   }
 
   String _cleanLabel() {
@@ -1423,6 +2515,29 @@ class TeamModel {
 
     return trimmed;
   }
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is TeamModel &&
+          runtimeType == other.runtimeType &&
+          teamId == other.teamId;
+
+  @override
+  int get hashCode => teamId.hashCode;
+}
+
+Timer? _teamsPersistTimer;
+void _persistTeamsThrottled() {
+  _teamsPersistTimer?.cancel();
+  _teamsPersistTimer = Timer(const Duration(seconds: 3), () async {
+    final Map<String, dynamic> jsonMap = {};
+    _teamCache.forEach((key, value) {
+      jsonMap[key] = value.toJson();
+    });
+    await PersistenceService.saveTeams(jsonMap);
+    debugPrint('Teams persisted to disk');
+  });
 }
 
 class GameModel {
@@ -1447,932 +2562,146 @@ class GameModel {
   });
 
   factory GameModel.fromJson(Map<String, dynamic> json) {
-    final String code = json["match_code"];
-    final String leagueId = "(${code.split("-")[0]})";
+    final String code = json["match_code"]?.toString() ?? '';
+    String leagueId = '';
+    if (code.contains("-")) {
+      leagueId = "(${code.split("-")[0]})";
+    }
+
+    final home = json["home_team"] as Map<String, dynamic>? ?? {};
+    final away = json["away_team"] as Map<String, dynamic>? ?? {};
 
     return GameModel(
-      matchCode: json["match_code"],
-      day: json["day"],
-      date: json["date"],
-      time: json["time"],
+      matchCode: code,
+      day: json["day"]?.toString() ?? '',
+      date: json["date"]?.toString() ?? '',
+      time: json["time"]?.toString() ?? '',
       homeTeam: TeamModel(
-        label: "$leagueId ${json["home_team"]["name"]}",
-        teamId: json["home_team"]["team_id"].toString(),
-        name: json["home_team"]["name"],
+        label: leagueId.isNotEmpty
+            ? "$leagueId ${home["name"] ?? ''}"
+            : (home["name"] ?? ''),
+        teamId: (home["team_id"] ?? home["id"])?.toString() ?? '',
+        name: home["name"]?.toString() ?? '',
       ),
       awayTeam: TeamModel(
-        label: "$leagueId ${json["away_team"]["name"]}",
-        teamId: json["away_team"]["team_id"].toString(),
-        name: json["away_team"]["name"],
+        label: leagueId.isNotEmpty
+            ? "$leagueId ${away["name"] ?? ''}"
+            : (away["name"] ?? ''),
+        teamId: (away["team_id"] ?? away["id"])?.toString() ?? '',
+        name: away["name"]?.toString() ?? '',
       ),
-      venue: json["venue"],
-      result: json["result"],
+      venue: json["venue"]?.toString() ?? '',
+      result: json["result"]?.toString() ?? '',
     );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'match_code': matchCode,
+      'day': day,
+      'date': date,
+      'time': time,
+      'home_team': {'name': homeTeam.name, 'team_id': homeTeam.teamId},
+      'away_team': {'name': awayTeam.name, 'team_id': awayTeam.teamId},
+      'venue': venue,
+      'result': result,
+    };
   }
 }
 
-class FavoriteTeamModel {
-  final String name;
-  final String leagueName;
-  final String? club;
-  final String? nextHome;
-  final String? nextAway;
-  final String? nextDay;
-  final int? nextDayNum;
-  final String? nextMonth;
-  final String? nextTime;
-  const FavoriteTeamModel({
-    required this.name,
-    required this.leagueName,
-    this.club,
-    this.nextHome,
-    this.nextAway,
-    this.nextDay,
-    this.nextDayNum,
-    this.nextMonth,
-    this.nextTime,
+class LeagueModel {
+  final String series;
+  final String seriesId;
+  final List<dynamic> ranking;
+  final String? alert;
+
+  LeagueModel({
+    required this.series,
+    required this.seriesId,
+    required this.ranking,
+    this.alert,
   });
+
+  factory LeagueModel.fromJson(Map<String, dynamic> json) {
+    List<dynamic> ranking = [];
+    String? alert = json['alert'] as String?;
+
+    final rawRanking = json['ranking'];
+    if (rawRanking is List) {
+      if (rawRanking.length == 2 &&
+          rawRanking[0] is List &&
+          rawRanking[1] is String) {
+        ranking = rawRanking[0];
+        alert ??= rawRanking[1];
+      } else {
+        ranking = rawRanking;
+      }
+    }
+
+    return LeagueModel(
+      series: json['series'] ?? '',
+      seriesId: json['series_id']?.toString() ?? '',
+      ranking: ranking,
+      alert: alert,
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'series': series,
+      'series_id': seriesId,
+      'ranking': alert != null ? [ranking, alert] : ranking,
+      'alert': alert,
+    };
+  }
+
+  static Future<LeagueModel> load(
+    String label, {
+    bool forceReload = false,
+  }) async {
+    final key = label;
+
+    if (_leagueCache.containsKey(key) && !forceReload) {
+      return _leagueCache[key]!;
+    }
+
+    final encodedLabel = Uri.encodeComponent(label);
+    final url = '${apiBaseUrl}api/get/league?label=$encodedLabel&season=2026';
+    final uri = Uri.parse(url);
+
+    try {
+      final response = await http.get(uri).timeout(const Duration(seconds: 10));
+
+      if (response.statusCode != 200) {
+        throw Exception('API Error: ${response.statusCode}');
+      }
+
+      final data = jsonDecode(response.body);
+      final league = LeagueModel.fromJson(data);
+
+      _leagueCache[key] = league;
+      // Throttled persist
+      _persistLeaguesThrottled();
+      return league;
+    } catch (e) {
+      debugPrint('LeagueModel.load failed for $label: $e');
+      if (_leagueCache.containsKey(key)) {
+        return _leagueCache[key]!;
+      }
+      rethrow;
+    }
+  }
 }
 
-class StaticData {
-  static final List<FavoriteTeamModel> favoriteTeams = const [
-    FavoriteTeamModel(
-      name: 'Kreg Rotselaar A',
-      leagueName: 'Heren Promo 1',
-      club: 'Kreg Rotselaar',
-      nextHome: 'Kreg Rotselaar A',
-      nextAway: 'VC Lennik A',
-      nextDay: 'Zo',
-      nextDayNum: 13,
-      nextMonth: 'sep',
-      nextTime: '16:00',
-    ),
-    FavoriteTeamModel(
-      name: 'Mendo Booischot B',
-      leagueName: 'Nationale 2 Heren B',
-      club: 'Mendo Booischot',
-      nextHome: 'Mavo Dilsen-Stokkem A',
-      nextAway: 'Mendo Booischot B',
-      nextDay: 'Za',
-      nextDayNum: 12,
-      nextMonth: 'sep',
-      nextTime: '20:00',
-    ),
-    FavoriteTeamModel(
-      name: 'Mendo Booischot A',
-      leagueName: 'Nationale 2 Dames B',
-      club: 'Mendo Booischot',
-      nextHome: 'Noust Spinley Dessel A',
-      nextAway: 'Mendo Booischot A',
-      nextDay: 'Za',
-      nextDayNum: 12,
-      nextMonth: 'sep',
-      nextTime: '18:00',
-    ),
-  ];
-
-  static final List<Map<String, dynamic>> homeMatches = [
-    {
-      'home_team': 'Kreg Rotselaar A',
-      'away_team': 'VC Lennik A',
-      'result': null,
-      'venue': 'Rotselaar, Sportoase De Meander',
-      'league_name': 'Heren Promo 1',
-      'time': '13/09/2026',
-      'match_time': '16:00',
-      'is_fav_home': true,
-      'fav_name': 'Kreg Rotselaar A',
-    },
-    {
-      'home_team': 'Mavo Dilsen-Stokkem A',
-      'away_team': 'Mendo Booischot B',
-      'result': null,
-      'venue': 'Dilsen-Stokkem, Sporthal',
-      'league_name': 'Nationale 2 Heren B',
-      'time': '13/09/2026',
-      'match_time': '20:00',
-      'is_fav_home': false,
-      'fav_name': 'Mendo Booischot B',
-    },
-    {
-      'home_team': 'Noust Spinley Dessel A',
-      'away_team': 'Mendo Booischot A',
-      'result': null,
-      'venue': 'Dessel, Sporthal',
-      'league_name': 'Nationale 2 Dames B',
-      'time': '13/09/2026',
-      'match_time': '18:00',
-      'is_fav_home': false,
-      'fav_name': 'Mendo Booischot A',
-    },
-    {
-      'home_team': 'Kruikenburg Ternat B',
-      'away_team': 'Kreg Rotselaar A',
-      'result': null,
-      'venue': 'Ternat, Sporthal Kruikenburg',
-      'league_name': 'Heren Promo 1',
-      'time': '19/09/2026',
-      'match_time': '20:30',
-      'is_fav_home': false,
-      'fav_name': 'Kreg Rotselaar A',
-    },
-    {
-      'home_team': 'Mendo Booischot B',
-      'away_team': 'VC Achel A',
-      'result': null,
-      'venue': 'Booischot, Sporthal Mendo',
-      'league_name': 'Nationale 2 Heren B',
-      'time': '20/09/2026',
-      'match_time': '20:00',
-      'is_fav_home': true,
-      'fav_name': 'Mendo Booischot B',
-    },
-    {
-      'home_team': 'Kreg Rotselaar A',
-      'away_team': 'VBT Machelen B',
-      'result': null,
-      'venue': 'Rotselaar, Sportoase De Meander',
-      'league_name': 'Heren Promo 1',
-      'time': '27/09/2026',
-      'match_time': '16:00',
-      'is_fav_home': true,
-      'fav_name': 'Kreg Rotselaar A',
-    },
-    {
-      'home_team': 'Kreg Rotselaar A',
-      'away_team': 'VC Feniks Haacht B',
-      'result': '3-1',
-      'venue': 'Rotselaar, Sportoase De Meander',
-      'league_name': 'Heren Promo 1',
-      'time': '15/11/2026',
-      'match_time': '16:00',
-      'is_fav_home': true,
-      'fav_name': 'Kreg Rotselaar A',
-    },
-    {
-      'home_team': 'Mendo Booischot B',
-      'away_team': 'Vlimmeren Sport A',
-      'result': null,
-      'venue': 'Booischot, Sporthal Mendo',
-      'league_name': 'Nationale 2 Heren B',
-      'time': '18/10/2026',
-      'match_time': '20:00',
-      'is_fav_home': true,
-      'fav_name': 'Mendo Booischot B',
-    },
-    {
-      'home_team': 'Kreg Rotselaar A',
-      'away_team': 'Wolvertem Sporting A',
-      'result': null,
-      'venue': 'Rotselaar, Sportoase De Meander',
-      'league_name': 'Heren Promo 1',
-      'time': '11/10/2026',
-      'match_time': '16:00',
-      'is_fav_home': true,
-      'fav_name': 'Kreg Rotselaar A',
-    },
-    {
-      'home_team': 'Mendo Booischot A',
-      'away_team': 'VC Beveren A',
-      'result': null,
-      'venue': 'Booischot, Sporthal Mendo',
-      'league_name': 'Nationale 2 Dames B',
-      'time': '27/09/2026',
-      'match_time': '20:00',
-      'is_fav_home': true,
-      'fav_name': 'Mendo Booischot A',
-    },
-    {
-      'home_team': 'Davoc Lot',
-      'away_team': 'Kreg Rotselaar A',
-      'result': null,
-      'venue': 'Lot, Vogelenzang',
-      'league_name': 'Heren Promo 1',
-      'time': '23/10/2026',
-      'match_time': '21:00',
-      'is_fav_home': false,
-      'fav_name': 'Kreg Rotselaar A',
-    },
-    {
-      'home_team': 'Kreg Rotselaar A',
-      'away_team': 'Lizards Lubbeek-Leuven B',
-      'result': null,
-      'venue': 'Rotselaar, Sportoase De Meander',
-      'league_name': 'Heren Promo 1',
-      'time': '06/12/2026',
-      'match_time': '16:00',
-      'is_fav_home': true,
-      'fav_name': 'Kreg Rotselaar A',
-    },
-  ];
-
-  static final List<Map<String, dynamic>> leagueOptions = const [
-    {'id': 'VHP1', 'name': 'Heren Promo 1'},
-    {'id': 'NAT2H-B', 'name': 'Nationale 2 Heren B'},
-    {'id': 'NAT2D-B', 'name': 'Nationale 2 Dames B'},
-    {'id': 'NAT1H', 'name': 'Nationale 1 Heren'},
-  ];
-
-  static final Map<String, List<Map<String, dynamic>>> rankings = {
-    'VHP1': [
-      {
-        'pos': 1,
-        'name': 'Volley Haasrode Leuven D',
-        'w': 7,
-        'l': 1,
-        'sw': 22,
-        'sl': 6,
-        'pts': 21,
-      },
-      {
-        'pos': 2,
-        'name': 'VC Lennik A',
-        'w': 6,
-        'l': 2,
-        'sw': 20,
-        'sl': 8,
-        'pts': 18,
-      },
-      {
-        'pos': 3,
-        'name': 'Kruikenburg Ternat B',
-        'w': 6,
-        'l': 2,
-        'sw': 19,
-        'sl': 9,
-        'pts': 17,
-      },
-      {
-        'pos': 4,
-        'name': 'Zuun Volleybal Club A',
-        'w': 5,
-        'l': 3,
-        'sw': 17,
-        'sl': 11,
-        'pts': 15,
-      },
-      {
-        'pos': 5,
-        'name': 'Kreg Rotselaar A',
-        'w': 4,
-        'l': 4,
-        'sw': 16,
-        'sl': 14,
-        'pts': 13,
-      },
-      {
-        'pos': 6,
-        'name': 'Wolvertem Sporting A',
-        'w': 4,
-        'l': 4,
-        'sw': 14,
-        'sl': 15,
-        'pts': 12,
-      },
-      {
-        'pos': 7,
-        'name': 'Volley Opwijk',
-        'w': 3,
-        'l': 5,
-        'sw': 13,
-        'sl': 16,
-        'pts': 10,
-      },
-      {
-        'pos': 8,
-        'name': 'Davoc Lot',
-        'w': 3,
-        'l': 5,
-        'sw': 12,
-        'sl': 17,
-        'pts': 9,
-      },
-      {
-        'pos': 9,
-        'name': 'VC Feniks Haacht B',
-        'w': 2,
-        'l': 6,
-        'sw': 10,
-        'sl': 19,
-        'pts': 7,
-      },
-      {
-        'pos': 10,
-        'name': 'VBT Machelen B',
-        'w': 2,
-        'l': 6,
-        'sw': 9,
-        'sl': 20,
-        'pts': 6,
-      },
-      {
-        'pos': 11,
-        'name': 'Volley Eternit Kapelle-Op-Den-Bos B',
-        'w': 1,
-        'l': 7,
-        'sw': 7,
-        'sl': 21,
-        'pts': 4,
-      },
-      {
-        'pos': 12,
-        'name': 'Lizards Lubbeek-Leuven B',
-        'w': 0,
-        'l': 8,
-        'sw': 5,
-        'sl': 24,
-        'pts': 1,
-      },
-    ],
-    'NAT2H-B': [
-      {
-        'pos': 1,
-        'name': 'Mavo Dilsen-Stokkem A',
-        'w': 6,
-        'l': 0,
-        'sw': 18,
-        'sl': 3,
-        'pts': 18,
-      },
-      {
-        'pos': 2,
-        'name': 'VOC Herentals A',
-        'w': 5,
-        'l': 1,
-        'sw': 16,
-        'sl': 5,
-        'pts': 15,
-      },
-      {
-        'pos': 3,
-        'name': 'Vlimmeren Sport A',
-        'w': 4,
-        'l': 2,
-        'sw': 14,
-        'sl': 8,
-        'pts': 13,
-      },
-      {
-        'pos': 4,
-        'name': 'Mendo Booischot B',
-        'w': 3,
-        'l': 3,
-        'sw': 13,
-        'sl': 10,
-        'pts': 10,
-      },
-      {
-        'pos': 5,
-        'name': 'VC Maasmechelen A',
-        'w': 3,
-        'l': 3,
-        'sw': 12,
-        'sl': 11,
-        'pts': 9,
-      },
-      {
-        'pos': 6,
-        'name': 'Turnhout A',
-        'w': 2,
-        'l': 4,
-        'sw': 10,
-        'sl': 13,
-        'pts': 7,
-      },
-      {
-        'pos': 7,
-        'name': 'VC Achel A',
-        'w': 1,
-        'l': 5,
-        'sw': 7,
-        'sl': 15,
-        'pts': 4,
-      },
-      {
-        'pos': 8,
-        'name': 'VC Bree A',
-        'w': 1,
-        'l': 5,
-        'sw': 6,
-        'sl': 16,
-        'pts': 3,
-      },
-      {
-        'pos': 9,
-        'name': 'VCK Beringen A',
-        'w': 0,
-        'l': 6,
-        'sw': 4,
-        'sl': 18,
-        'pts': 1,
-      },
-    ],
-    'NAT2D-B': [
-      {
-        'pos': 1,
-        'name': 'Noust Spinley Dessel A',
-        'w': 5,
-        'l': 0,
-        'sw': 15,
-        'sl': 2,
-        'pts': 15,
-      },
-      {
-        'pos': 2,
-        'name': 'Mendo Booischot A',
-        'w': 4,
-        'l': 1,
-        'sw': 13,
-        'sl': 5,
-        'pts': 12,
-      },
-      {
-        'pos': 3,
-        'name': 'VOS Tessenderlo A',
-        'w': 3,
-        'l': 2,
-        'sw': 11,
-        'sl': 7,
-        'pts': 10,
-      },
-      {
-        'pos': 4,
-        'name': 'Dynamo Heusden-Zolder A',
-        'w': 3,
-        'l': 2,
-        'sw': 10,
-        'sl': 8,
-        'pts': 9,
-      },
-      {
-        'pos': 5,
-        'name': 'VCB Dilsen A',
-        'w': 2,
-        'l': 3,
-        'sw': 8,
-        'sl': 10,
-        'pts': 7,
-      },
-      {
-        'pos': 6,
-        'name': 'VC Beveren A',
-        'w': 1,
-        'l': 4,
-        'sw': 6,
-        'sl': 13,
-        'pts': 4,
-      },
-      {
-        'pos': 7,
-        'name': 'Voc Schriek A',
-        'w': 1,
-        'l': 4,
-        'sw': 5,
-        'sl': 14,
-        'pts': 3,
-      },
-      {
-        'pos': 8,
-        'name': 'V O L A K Vorselaar A',
-        'w': 0,
-        'l': 5,
-        'sw': 3,
-        'sl': 15,
-        'pts': 1,
-      },
-    ],
-    'NAT1H': [
-      {
-        'pos': 1,
-        'name': 'VC Packo Zedelgem A',
-        'w': 7,
-        'l': 0,
-        'sw': 21,
-        'sl': 3,
-        'pts': 21,
-      },
-      {
-        'pos': 2,
-        'name': 'Voc Hamme A',
-        'w': 6,
-        'l': 1,
-        'sw': 19,
-        'sl': 6,
-        'pts': 18,
-      },
-      {
-        'pos': 3,
-        'name': 'VKJ De Haan A',
-        'w': 5,
-        'l': 2,
-        'sw': 17,
-        'sl': 8,
-        'pts': 15,
-      },
-      {
-        'pos': 4,
-        'name': 'VC Halen A',
-        'w': 4,
-        'l': 3,
-        'sw': 15,
-        'sl': 10,
-        'pts': 12,
-      },
-      {
-        'pos': 5,
-        'name': 'Mendo Booischot A',
-        'w': 3,
-        'l': 4,
-        'sw': 13,
-        'sl': 13,
-        'pts': 10,
-      },
-      {
-        'pos': 6,
-        'name': 'VTB Ieper A',
-        'w': 2,
-        'l': 5,
-        'sw': 10,
-        'sl': 15,
-        'pts': 7,
-      },
-      {
-        'pos': 7,
-        'name': 'VOC Keerbergen A',
-        'w': 1,
-        'l': 6,
-        'sw': 8,
-        'sl': 18,
-        'pts': 4,
-      },
-      {
-        'pos': 8,
-        'name': 'VCM Brugge A',
-        'w': 0,
-        'l': 7,
-        'sw': 5,
-        'sl': 21,
-        'pts': 1,
-      },
-    ],
-  };
-
-  static final Map<String, List<Map<String, dynamic>>> clubCompTeams = {
-    'Kreg Rotselaar': [
-      {
-        'team': 'Kreg Rotselaar A',
-        'series': 'Heren Promo 1',
-        'ranking': '5e',
-        'next_match': '13/09/2026 16:00 Kreg Rotselaar A - VC Lennik A',
-        'is_fav': true,
-      },
-      {
-        'team': 'Kreg Rotselaar B',
-        'series': 'Heren Promo 3 B',
-        'ranking': '8e',
-        'next_match': '13/09/2026 14:00 Kreg Rotselaar B - VBT Machelen C',
-        'is_fav': false,
-      },
-      {
-        'team': 'Kreg Rotselaar A',
-        'series': 'Dames Promo 1',
-        'ranking': '3e',
-        'next_match': '12/09/2026 18:00 VC Lennik D - Kreg Rotselaar A',
-        'is_fav': false,
-      },
-      {
-        'team': 'Kreg Rotselaar',
-        'series': 'Dames Promo 3 C',
-        'ranking': '6e',
-        'next_match': '13/09/2026 15:00 Kreg Rotselaar - Voc Schriek D',
-        'is_fav': false,
-      },
-      {
-        'team': 'Kreg Rotselaar',
-        'series': 'Dames Promo 4 A',
-        'ranking': '4e',
-        'next_match':
-            '12/09/2026 17:00 Grinta Valentino Lint C - Kreg Rotselaar',
-        'is_fav': false,
-      },
-    ],
-    'Mendo Booischot': [
-      {
-        'team': 'Mendo Booischot A',
-        'series': 'Nationale 1 Heren',
-        'ranking': '7e',
-        'next_match':
-            '12/09/2026 20:00 VC Packo Zedelgem A - Mendo Booischot A',
-        'is_fav': false,
-      },
-      {
-        'team': 'Mendo Booischot B',
-        'series': 'Nationale 2 Heren B',
-        'ranking': '4e',
-        'next_match':
-            '12/09/2026 20:00 Mavo Dilsen-Stokkem A - Mendo Booischot B',
-        'is_fav': true,
-      },
-      {
-        'team': 'Mendo Booischot C',
-        'series': 'Nationale 3 Heren B',
-        'ranking': '9e',
-        'next_match': '12/09/2026 19:30 Mendo Booischot C - Berg-op Wijgmaal A',
-        'is_fav': false,
-      },
-      {
-        'team': 'Mendo Booischot A',
-        'series': 'Nationale 2 Dames B',
-        'ranking': '2e',
-        'next_match':
-            '12/09/2026 18:00 Noust Spinley Dessel A - Mendo Booischot A',
-        'is_fav': true,
-      },
-      {
-        'team': 'Mendo Booischot D',
-        'series': 'Heren Promo 2',
-        'ranking': '6e',
-        'next_match':
-            '13/09/2026 18:00 Mortsel Volley Antwerpen B - Mendo Booischot D',
-        'is_fav': false,
-      },
-      {
-        'team': 'Mendo Booischot B',
-        'series': 'Dames Promo 1',
-        'ranking': '5e',
-        'next_match':
-            '13/09/2026 13:30 Mendo Booischot B - Mendo Dames Promo Booischot',
-        'is_fav': false,
-      },
-      {
-        'team': 'Mendo Booischot C',
-        'series': 'Dames Promo 3 B',
-        'ranking': '3e',
-        'next_match':
-            '12/09/2026 16:30 TeamFisk Volley Puurs A - Mendo Booischot C',
-        'is_fav': false,
-      },
-    ],
-  };
-
-  static final Map<String, List<Map<String, dynamic>>> clubCupTeams = {
-    'Kreg Rotselaar': [
-      {
-        'team': 'Kreg Rotselaar A',
-        'series': 'Beker Vlaams-Brabant Heren',
-        'ranking': '',
-        'next_match': '25/10/2026 19:30 Kreg Rotselaar A - VC Feniks Haacht A',
-        'is_fav': true,
-      },
-      {
-        'team': 'Kreg Rotselaar A',
-        'series': 'Beker Vlaams-Brabant Dames',
-        'ranking': '',
-        'next_match': '01/11/2026 15:00 Kreg Rotselaar A - VBT Machelen A',
-        'is_fav': false,
-      },
-    ],
-    'Mendo Booischot': [
-      {
-        'team': 'Mendo Booischot B (P1)',
-        'series': 'Interfederale Beker Dames',
-        'ranking': '',
-        'next_match':
-            '31/10/2026 20:00 Mendo Booischot B (P1) - VC Optima Lier',
-        'is_fav': false,
-      },
-      {
-        'team': 'Mendo Booischot (N1)',
-        'series': 'Beker van Antwerpen Heren',
-        'ranking': '',
-        'next_match': '19/12/2026 20:00 VC Geel - Mendo Booischot (N1)',
-        'is_fav': false,
-      },
-      {
-        'team': 'Mendo Booischot (N2) +4',
-        'series': 'Beker van Antwerpen Dames',
-        'ranking': '',
-        'next_match':
-            '31/10/2026 20:00 Mendo Booischot (N2)+4 - KwadrO Amigos Zoersel',
-        'is_fav': false,
-      },
-    ],
-  };
-
-  static final Map<String, List<Map<String, dynamic>>> teamMatches = {
-    'Kreg Rotselaar A': [
-      {
-        'home_team': 'Kreg Rotselaar A',
-        'away_team': 'VC Lennik A',
-        'result': null,
-        'venue': 'Rotselaar, Sportoase De Meander',
-        'time': '13/09/2026',
-        'match_time': '16:00',
-      },
-      {
-        'home_team': 'Kruikenburg Ternat B',
-        'away_team': 'Kreg Rotselaar A',
-        'result': null,
-        'venue': 'Ternat, Sporthal Kruikenburg',
-        'time': '19/09/2026',
-        'match_time': '20:30',
-      },
-      {
-        'home_team': 'Kreg Rotselaar A',
-        'away_team': 'VBT Machelen B',
-        'result': null,
-        'venue': 'Rotselaar, Sportoase De Meander',
-        'time': '27/09/2026',
-        'match_time': '16:00',
-      },
-      {
-        'home_team': 'Zuun Volleybal Club A',
-        'away_team': 'Kreg Rotselaar A',
-        'result': null,
-        'venue': 'Sint-Pieters-Leeuw, Wildersportcomplex',
-        'time': '02/10/2026',
-        'match_time': '21:00',
-      },
-      {
-        'home_team': 'Kreg Rotselaar A',
-        'away_team': 'Wolvertem Sporting A',
-        'result': null,
-        'venue': 'Rotselaar, Sportoase De Meander',
-        'time': '11/10/2026',
-        'match_time': '16:00',
-      },
-      {
-        'home_team': 'Davoc Lot',
-        'away_team': 'Kreg Rotselaar A',
-        'result': null,
-        'venue': 'Lot, Vogelenzang',
-        'time': '23/10/2026',
-        'match_time': '21:00',
-      },
-      {
-        'home_team': 'Volley Opwijk',
-        'away_team': 'Kreg Rotselaar A',
-        'result': null,
-        'venue': 'Opwijk, Sportzaal VKO',
-        'time': '07/11/2026',
-        'match_time': '21:00',
-      },
-      {
-        'home_team': 'Kreg Rotselaar A',
-        'away_team': 'VC Feniks Haacht B',
-        'result': '3-1',
-        'venue': 'Rotselaar, Sportoase De Meander',
-        'time': '15/11/2026',
-        'match_time': '16:00',
-      },
-      {
-        'home_team': 'Volley Haasrode Leuven D',
-        'away_team': 'Kreg Rotselaar A',
-        'result': null,
-        'venue': 'Haasrode, Sportcomplex',
-        'time': '20/11/2026',
-        'match_time': '21:00',
-      },
-      {
-        'home_team': 'Kreg Rotselaar A',
-        'away_team': 'Lizards Lubbeek-Leuven B',
-        'result': null,
-        'venue': 'Rotselaar, Sportoase De Meander',
-        'time': '06/12/2026',
-        'match_time': '16:00',
-      },
-      {
-        'home_team': 'VC Lennik A',
-        'away_team': 'Kreg Rotselaar A',
-        'result': null,
-        'venue': 'Lennik, Sporthal Jo Baetens',
-        'time': '02/01/2027',
-        'match_time': '20:30',
-      },
-      {
-        'home_team': 'Kreg Rotselaar A',
-        'away_team': 'Kruikenburg Ternat B',
-        'result': null,
-        'venue': 'Rotselaar, Sportoase De Meander',
-        'time': '10/01/2027',
-        'match_time': '16:00',
-      },
-      {
-        'home_team': 'Kreg Rotselaar A',
-        'away_team': 'Zuun Volleybal Club A',
-        'result': null,
-        'venue': 'Rotselaar, Sportoase De Meander',
-        'time': '24/01/2027',
-        'match_time': '16:00',
-      },
-      {
-        'home_team': 'Kreg Rotselaar A',
-        'away_team': 'Davoc Lot',
-        'result': null,
-        'venue': 'Rotselaar, Sportoase De Meander',
-        'time': '21/02/2027',
-        'match_time': '16:00',
-      },
-      {
-        'home_team': 'Kreg Rotselaar A',
-        'away_team': 'Volley Eternit Kapelle-Op-Den-Bos B',
-        'result': null,
-        'venue': 'Rotselaar, Sportoase De Meander',
-        'time': '28/03/2027',
-        'match_time': '16:00',
-      },
-    ],
-    'Mendo Booischot B': [
-      {
-        'home_team': 'Mavo Dilsen-Stokkem A',
-        'away_team': 'Mendo Booischot B',
-        'result': null,
-        'venue': 'Dilsen-Stokkem, Sporthal',
-        'time': '12/09/2026',
-        'match_time': '20:00',
-      },
-      {
-        'home_team': 'Mendo Booischot B',
-        'away_team': 'VC Achel A',
-        'result': null,
-        'venue': 'Booischot, Sporthal Mendo',
-        'time': '20/09/2026',
-        'match_time': '20:00',
-      },
-      {
-        'home_team': 'VOC Herentals A',
-        'away_team': 'Mendo Booischot B',
-        'result': null,
-        'venue': 'Herentals, Sporthal',
-        'time': '03/10/2026',
-        'match_time': '21:00',
-      },
-      {
-        'home_team': 'Mendo Booischot B',
-        'away_team': 'Vlimmeren Sport A',
-        'result': null,
-        'venue': 'Booischot, Sporthal Mendo',
-        'time': '18/10/2026',
-        'match_time': '20:00',
-      },
-      {
-        'home_team': 'Mendo Booischot B',
-        'away_team': 'VC Maasmechelen A',
-        'result': null,
-        'venue': 'Booischot, Sporthal Mendo',
-        'time': '08/11/2026',
-        'match_time': '20:00',
-      },
-      {
-        'home_team': 'Turnhout A',
-        'away_team': 'Mendo Booischot B',
-        'result': null,
-        'venue': 'Turnhout, Sporthal',
-        'time': '06/12/2026',
-        'match_time': '20:00',
-      },
-    ],
-    'Mendo Booischot A': [
-      {
-        'home_team': 'Noust Spinley Dessel A',
-        'away_team': 'Mendo Booischot A',
-        'result': null,
-        'venue': 'Dessel, Sporthal',
-        'time': '12/09/2026',
-        'match_time': '18:00',
-      },
-      {
-        'home_team': 'Mendo Booischot A',
-        'away_team': 'VC Beveren A',
-        'result': null,
-        'venue': 'Booischot, Sporthal Mendo',
-        'time': '27/09/2026',
-        'match_time': '20:00',
-      },
-      {
-        'home_team': 'VOS Tessenderlo A',
-        'away_team': 'Mendo Booischot A',
-        'result': null,
-        'venue': 'Tessenderlo, Sporthal',
-        'time': '10/10/2026',
-        'match_time': '21:00',
-      },
-      {
-        'home_team': 'Mendo Booischot A',
-        'away_team': 'Dynamo Heusden-Zolder A',
-        'result': null,
-        'venue': 'Booischot, Sporthal Mendo',
-        'time': '25/10/2026',
-        'match_time': '20:00',
-      },
-      {
-        'home_team': 'Mendo Booischot A',
-        'away_team': 'VCB Dilsen A',
-        'result': null,
-        'venue': 'Booischot, Sporthal Mendo',
-        'time': '15/11/2026',
-        'match_time': '20:00',
-      },
-    ],
-  };
+Timer? _leaguesPersistTimer;
+void _persistLeaguesThrottled() {
+  _leaguesPersistTimer?.cancel();
+  _leaguesPersistTimer = Timer(const Duration(seconds: 5), () async {
+    final Map<String, dynamic> jsonMap = {};
+    _leagueCache.forEach((key, value) {
+      jsonMap[key] = value.toJson();
+    });
+    await PersistenceService.saveLeagues(jsonMap);
+    debugPrint('Leagues persisted to disk');
+  });
 }

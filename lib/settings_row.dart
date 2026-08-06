@@ -29,7 +29,7 @@ class VSettingsRow extends StatelessWidget {
       behavior: HitTestBehavior.opaque,
       child: Container(
         padding: const EdgeInsets.symmetric(vertical: 14),
-        decoration: const BoxDecoration(
+        decoration: BoxDecoration(
           border: Border(bottom: BorderSide(color: cardBorder)),
         ),
         child: Row(
@@ -59,7 +59,7 @@ class VSettingsRow extends StatelessWidget {
             if (trailing != null)
               trailing!
             else
-              const Icon(Icons.chevron_right, size: 12, color: secondary),
+              Icon(Icons.chevron_right, size: 12, color: secondary),
           ],
         ),
       ),

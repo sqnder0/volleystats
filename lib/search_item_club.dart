@@ -54,7 +54,7 @@ class VSearchItemClub extends StatelessWidget {
               ),
             ),
 
-            const Icon(Icons.chevron_right, size: 12, color: secondary),
+            Icon(Icons.chevron_right, size: 12, color: secondary),
           ],
         ),
       ),

@@ -83,7 +83,7 @@ class VTeamDetailMatchCard extends StatelessWidget {
                     color: cardBgAlt,
                     borderRadius: BorderRadius.circular(6),
                   ),
-                  child: const Text(
+                  child: Text(
                     'TEKOMST',
                     style: TextStyle(
                       fontSize: 10,
@@ -110,7 +110,7 @@ class VTeamDetailMatchCard extends StatelessWidget {
               ),
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 8),
-                child: const Text(
+                child: Text(
                   '-',
                   style: TextStyle(fontSize: 11, color: secondary),
                 ),
@@ -132,11 +132,7 @@ class VTeamDetailMatchCard extends StatelessWidget {
 
           Row(
             children: [
-              const Icon(
-                Icons.location_on_outlined,
-                size: 10,
-                color: secondary,
-              ),
+              Icon(Icons.location_on_outlined, size: 10, color: secondary),
               const SizedBox(width: 5),
               Expanded(
                 child: Text(

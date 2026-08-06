@@ -111,7 +111,7 @@ class VMatchCard extends StatelessWidget {
                           padding: const EdgeInsets.symmetric(horizontal: 4),
                           child: hasResult
                               ? Text(result!, style: VTextStyles.scoreText)
-                              : const Text('vs', style: VTextStyles.vsText),
+                              : Text('vs', style: VTextStyles.vsText),
                         ),
                         Expanded(
                           child: Column(
@@ -137,7 +137,7 @@ class VMatchCard extends StatelessWidget {
                     const SizedBox(height: 8),
                     Row(
                       children: [
-                        const Icon(
+                        Icon(
                           Icons.location_on_outlined,
                           size: 10,
                           color: secondary,

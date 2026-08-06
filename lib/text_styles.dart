@@ -5,7 +5,7 @@ class VTextStyles {
   static const String _fontHeading = 'SpaceGrotesk';
   static const String _fontBody = 'DM Sans';
 
-  static const TextStyle h1 = TextStyle(
+  static TextStyle get h1 => TextStyle(
     fontFamily: _fontHeading,
     fontSize: 24,
     fontWeight: FontWeight.w700,
@@ -13,63 +13,63 @@ class VTextStyles {
     height: 1.1,
   );
 
-  static const TextStyle h2 = TextStyle(
+  static TextStyle get h2 => TextStyle(
     fontFamily: _fontHeading,
     fontSize: 22,
     fontWeight: FontWeight.w700,
     color: light,
   );
 
-  static const TextStyle h3 = TextStyle(
+  static TextStyle get h3 => TextStyle(
     fontFamily: _fontHeading,
     fontSize: 16,
     fontWeight: FontWeight.w700,
     color: light,
   );
 
-  static const TextStyle bodyBold = TextStyle(
+  static TextStyle get bodyBold => TextStyle(
     fontFamily: _fontBody,
     fontSize: 14,
     fontWeight: FontWeight.w600,
     color: light,
   );
 
-  static const TextStyle body = TextStyle(
+  static TextStyle get body => TextStyle(
     fontFamily: _fontBody,
     fontSize: 13,
     fontWeight: FontWeight.w500,
     color: light,
   );
 
-  static const TextStyle bodySecondary = TextStyle(
+  static TextStyle get bodySecondary => TextStyle(
     fontFamily: _fontBody,
     fontSize: 12,
     fontWeight: FontWeight.w500,
     color: secondary,
   );
 
-  static const TextStyle bodySecondaryBright = TextStyle(
+  static TextStyle get bodySecondaryBright => TextStyle(
     fontFamily: _fontBody,
     fontSize: 12,
     fontWeight: FontWeight.w500,
     color: secondaryBright,
   );
 
-  static const TextStyle caption = TextStyle(
+  static TextStyle get caption => TextStyle(
     fontFamily: _fontBody,
     fontSize: 11,
     fontWeight: FontWeight.w500,
     color: secondary,
   );
 
-  static const TextStyle captionBold = TextStyle(
+  static TextStyle get captionBold => TextStyle(
     fontFamily: _fontBody,
     fontSize: 11,
     fontWeight: FontWeight.w700,
     color: secondary,
   );
 
-  static const TextStyle smallLabel = TextStyle(
+  static TextStyle get smallLabel => TextStyle(
     fontFamily: _fontBody,
     fontSize: 10,
     fontWeight: FontWeight.w600,
@@ -77,28 +77,28 @@ class VTextStyles {
     letterSpacing: 0.3,
   );
 
-  static const TextStyle statNumber = TextStyle(
+  static TextStyle get statNumber => TextStyle(
     fontFamily: _fontHeading,
     fontSize: 28,
     fontWeight: FontWeight.w800,
     color: accentYellow,
   );
 
-  static const TextStyle scoreText = TextStyle(
+  static TextStyle get scoreText => TextStyle(
     fontFamily: _fontHeading,
     fontSize: 14,
     fontWeight: FontWeight.w800,
     color: light,
   );
 
-  static const TextStyle vsText = TextStyle(
+  static TextStyle get vsText => TextStyle(
     fontFamily: _fontBody,
     fontSize: 18,
     fontWeight: FontWeight.w300,
     color: secondary,
   );
 
-  static const TextStyle dateBig = TextStyle(
+  static TextStyle get dateBig => TextStyle(
     fontFamily: _fontHeading,
     fontSize: 18,
     fontWeight: FontWeight.w800,
@@ -106,7 +106,7 @@ class VTextStyles {
     height: 1,
   );
 
-  static const TextStyle dateSmall = TextStyle(
+  static TextStyle get dateSmall => TextStyle(
     fontFamily: _fontBody,
     fontSize: 8,
     fontWeight: FontWeight.w600,
@@ -114,14 +114,14 @@ class VTextStyles {
     textBaseline: TextBaseline.alphabetic,
   );
 
-  static const TextStyle rankPts = TextStyle(
+  static TextStyle get rankPts => TextStyle(
     fontFamily: _fontBody,
     fontSize: 12,
     fontWeight: FontWeight.w700,
     color: accentYellow,
   );
 
-  static const TextStyle badgeText = TextStyle(
+  static TextStyle get badgeText => TextStyle(
     fontFamily: _fontBody,
     fontSize: 10,
     fontWeight: FontWeight.w700,

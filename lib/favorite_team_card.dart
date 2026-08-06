@@ -65,7 +65,7 @@ class VFavoriteTeamCard extends StatelessWidget {
                         const SizedBox(height: 6),
                         Row(
                           children: [
-                            const Icon(
+                            Icon(
                               Icons.shield_outlined,
                               size: 12,
                               color: secondary,
@@ -88,7 +88,7 @@ class VFavoriteTeamCard extends StatelessWidget {
 
             if (hasUpcomingMatch) ...[
               const SizedBox(height: 12),
-              const Divider(color: cardBorder, height: 1),
+              Divider(color: cardBorder, height: 1),
               const SizedBox(height: 12),
               Row(
                 children: [
@@ -120,11 +120,7 @@ class VFavoriteTeamCard extends StatelessWidget {
                         const SizedBox(height: 2),
                         Row(
                           children: [
-                            const Icon(
-                              Icons.access_time,
-                              size: 11,
-                              color: secondary,
-                            ),
+                            Icon(Icons.access_time, size: 11, color: secondary),
                             const SizedBox(width: 3),
                             Text(nextTime ?? '', style: VTextStyles.caption),
                           ],
@@ -133,17 +129,14 @@ class VFavoriteTeamCard extends StatelessWidget {
                     ),
                   ),
 
-                  const Icon(Icons.chevron_right, size: 11, color: secondary),
+                  Icon(Icons.chevron_right, size: 11, color: secondary),
                 ],
               ),
             ] else ...[
               const SizedBox(height: 12),
-              const Divider(color: cardBorder, height: 1),
+              Divider(color: cardBorder, height: 1),
               const SizedBox(height: 12),
-              const Text(
-                'Geen geplande wedstrijden',
-                style: VTextStyles.caption,
-              ),
+              Text('Geen geplande wedstrijden', style: VTextStyles.caption),
             ],
           ],
         ),

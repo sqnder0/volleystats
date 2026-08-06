@@ -10,15 +10,18 @@ class VStatCard extends StatelessWidget {
   final Color gradientEnd;
   final Color borderColor;
 
-  const VStatCard({
+  VStatCard({
     super.key,
     required this.value,
     required this.label,
     this.valueColor = accentYellow,
-    this.gradientStart = const Color(0x1EFFC902),
-    this.gradientEnd = const Color(0x0AFFC902),
-    this.borderColor = const Color(0x26FFC902),
-  });
+    Color? gradientStart,
+    Color? gradientEnd,
+    Color? borderColor,
+  }) : this.gradientStart =
+           gradientStart ?? accentYellow.withValues(alpha: 0.12),
+       this.gradientEnd = gradientEnd ?? accentYellow.withValues(alpha: 0.04),
+       this.borderColor = borderColor ?? accentYellow.withValues(alpha: 0.15);
 
   @override
   Widget build(BuildContext context) {

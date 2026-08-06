@@ -1,0 +1,5 @@
+- [x] Add `favoritesNotifier` to `FavoritesService` to broadcast changes
+- [x] Implement listeners in `RankingsPage`, `FavoritesPage`, and `HomePage`
+- [x] Correctly differentiate between "No Favorites" and "No Leagues for Favorites" in Rankings
+- [x] Verify vertical and horizontal centering of empty states
+- [x] Clean up any stale state issues

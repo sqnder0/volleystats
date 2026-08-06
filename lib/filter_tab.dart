@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'colors.dart';
 import 'text_styles.dart';
+import 'theme_service.dart';
 
 class VFilterTab extends StatelessWidget {
   final String label;
@@ -32,7 +33,9 @@ class VFilterTab extends StatelessWidget {
           label,
           style: VTextStyles.bodyBold.copyWith(
             fontSize: 12,
-            color: isActive ? primary : secondary,
+            color: isActive
+                ? (ThemeService.isDarkMode ? primary : textSlateDeep)
+                : secondary,
           ),
         ),
       ),
