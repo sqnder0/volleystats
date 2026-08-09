@@ -42,9 +42,12 @@ final Map<String, LeagueModel> _leagueCache = {};
 // ============================================================
 // Main
 // ============================================================
-void main() async {
+void main() {
   WidgetsFlutterBinding.ensureInitialized();
+  runApp(const VolleyStatsApp());
+}
 
+Future<void> _initApp() async {
   // Initialize in parallel for faster startup
   await Future.wait([
     ThemeService.init(),
@@ -54,7 +57,6 @@ void main() async {
 
   // Start pre-loading favorites in background
   FavoritesService.preloadFavorites();
-  runApp(const VolleyStatsApp());
 }
 
 Future<void> _loadPersistentCaches() async {
@@ -79,23 +81,43 @@ Future<void> _loadPersistentCaches() async {
   }
 }
 
-class VolleyStatsApp extends StatelessWidget {
+class VolleyStatsApp extends StatefulWidget {
   const VolleyStatsApp({super.key});
 
   @override
+  State<VolleyStatsApp> createState() => _VolleyStatsAppState();
+}
+
+class _VolleyStatsAppState extends State<VolleyStatsApp> {
+  late Future<void> _initFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    _initFuture = _initApp();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    return ValueListenableBuilder<bool>(
-      valueListenable: ThemeService.darkModeNotifier,
-      builder: (context, isDarkMode, child) {
-        return MaterialApp(
-          title: 'VolleyStats',
-          debugShowCheckedModeBanner: false,
-          theme: ThemeData(
-            scaffoldBackgroundColor: primary,
-            fontFamily: 'DM Sans',
-            brightness: isDarkMode ? Brightness.dark : Brightness.light,
-          ),
-          home: const MainShell(),
+    return FutureBuilder<void>(
+      future: _initFuture,
+      builder: (context, snapshot) {
+        final isLoaded = snapshot.connectionState == ConnectionState.done;
+
+        return ValueListenableBuilder<bool>(
+          valueListenable: ThemeService.darkModeNotifier,
+          builder: (context, isDarkMode, child) {
+            return MaterialApp(
+              title: 'VolleyStats',
+              debugShowCheckedModeBanner: false,
+              theme: ThemeData(
+                scaffoldBackgroundColor: primary,
+                fontFamily: 'DM Sans',
+                brightness: isDarkMode ? Brightness.dark : Brightness.light,
+              ),
+              home: isLoaded ? const MainShell() : const VLoadingPage(),
+            );
+          },
         );
       },
     );
@@ -326,42 +348,6 @@ class _HomePageState extends State<HomePage> {
                       Text('VolleyStats', style: VTextStyles.h1),
                       const SizedBox(height: 2),
                     ],
-                  ),
-                  GestureDetector(
-                    onTap: () =>
-                        VToastOverlay.show(context, 'Geen nieuwe notificaties'),
-                    child: Container(
-                      width: 38,
-                      height: 38,
-                      decoration: BoxDecoration(
-                        color: cardBg,
-                        borderRadius: BorderRadius.circular(12),
-                        border: Border.all(color: cardBorder),
-                      ),
-                      child: Stack(
-                        alignment: Alignment.center,
-                        children: [
-                          Icon(
-                            Icons.notifications_outlined,
-                            size: 15,
-                            color: secondary,
-                          ),
-                          Positioned(
-                            top: 6,
-                            right: 6,
-                            child: Container(
-                              width: 7,
-                              height: 7,
-                              decoration: BoxDecoration(
-                                color: accentRed,
-                                shape: BoxShape.circle,
-                                border: Border.all(color: cardBg, width: 1.5),
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
                   ),
                 ],
               ),
@@ -720,18 +706,22 @@ class _SearchPageState extends State<SearchPage> {
           const SizedBox(height: 60),
           const Center(child: CircularProgressIndicator(color: accentYellow)),
         ] else if (_isOffline) ...[
-          VEmptyState(
-            icon: Icons.wifi_off_rounded,
-            title: 'Je bent offline',
-            subtitle: 'Controleer je verbinding om te kunnen zoeken.',
-            actionLabel: 'Opnieuw proberen',
-            onActionTap: () => _performSearch(_query),
+          Center(
+            child: VEmptyState(
+              icon: Icons.wifi_off_rounded,
+              title: 'Je bent offline',
+              subtitle: 'Controleer je verbinding om te kunnen zoeken.',
+              actionLabel: 'Opnieuw proberen',
+              onActionTap: () => _performSearch(_query),
+            ),
           ),
         ] else if (_query == '') ...[
-          VEmptyState(
-            icon: Icons.search,
-            title: 'Zoek clubs of teams',
-            subtitle: 'Type iets om te beginnen (bv: Mendo)',
+          Center(
+            child: VEmptyState(
+              icon: Icons.search,
+              title: 'Zoek clubs of teams',
+              subtitle: 'Type iets om te beginnen (bv: Mendo)',
+            ),
           ),
         ] else ...[
           if (_apiClubs.isNotEmpty) ...[
@@ -782,10 +772,12 @@ class _SearchPageState extends State<SearchPage> {
             ),
           ],
           if (_apiClubs.isEmpty && _apiTeams.isEmpty)
-            VEmptyState(
-              icon: Icons.search,
-              title: 'Geen resultaten voor "$_query"',
-              subtitle: 'Probeer een andere zoekterm.',
+            Center(
+              child: VEmptyState(
+                icon: Icons.search,
+                title: 'Geen resultaten voor "$_query"',
+                subtitle: 'Probeer een andere zoekterm.',
+              ),
             ),
         ],
       ],
@@ -1266,11 +1258,13 @@ class _FavoritesPageState extends State<FavoritesPage> {
               final favorites = snapshot.data ?? [];
 
               if (favorites.isEmpty) {
-                return const VEmptyState(
-                  icon: Icons.star_border,
-                  title: 'Geen favorieten',
-                  subtitle:
-                      'Voeg teams toe aan je favorieten om ze hier te bekijken.',
+                return const Center(
+                  child: VEmptyState(
+                    icon: Icons.star_border,
+                    title: 'Geen favorieten',
+                    subtitle:
+                        'Voeg teams toe aan je favorieten om ze hier te bekijken.',
+                  ),
                 );
               }
 
@@ -1357,7 +1351,6 @@ class MorePage extends StatefulWidget {
 class _MorePageState extends State<MorePage> {
   bool _notificationsEnabled = false;
   TimeOfDay _notificationTime = const TimeOfDay(hour: 8, minute: 0);
-  int _favCount = 0;
 
   @override
   void initState() {
@@ -1368,12 +1361,10 @@ class _MorePageState extends State<MorePage> {
   Future<void> _loadSettings() async {
     final enabled = await FavoritesService.areNotificationsEnabled();
     final time = await FavoritesService.getNotificationTime();
-    final favs = await FavoritesService.loadFavorites();
     if (mounted) {
       setState(() {
         _notificationsEnabled = enabled;
         _notificationTime = time;
-        _favCount = favs.length;
       });
     }
   }
@@ -1429,49 +1420,6 @@ class _MorePageState extends State<MorePage> {
       padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
       children: [
         Text('Meer', style: VTextStyles.h2),
-        const SizedBox(height: 20),
-
-        // Profiel
-        Container(
-          decoration: BoxDecoration(
-            gradient: LinearGradient(
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-              colors: [cardBg, cardBgAlt],
-            ),
-            borderRadius: BorderRadius.circular(16),
-            border: Border.all(color: cardBorder),
-          ),
-          padding: const EdgeInsets.all(20),
-          child: Row(
-            children: [
-              Container(
-                width: 52,
-                height: 52,
-                decoration: BoxDecoration(
-                  color: accentYellow,
-                  borderRadius: BorderRadius.circular(14),
-                ),
-                child: Icon(Icons.person, size: 22, color: primary),
-              ),
-              const SizedBox(width: 14),
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'VolleyStats Gebruiker',
-                    style: VTextStyles.bodyBold.copyWith(fontSize: 16),
-                  ),
-                  const SizedBox(height: 2),
-                  Text(
-                    '$_favCount teams gevolgd',
-                    style: VTextStyles.bodySecondary,
-                  ),
-                ],
-              ),
-            ],
-          ),
-        ),
         const SizedBox(height: 24),
 
         // Instellingen
@@ -2704,4 +2652,50 @@ void _persistLeaguesThrottled() {
     await PersistenceService.saveLeagues(jsonMap);
     debugPrint('Leagues persisted to disk');
   });
+}
+
+class VLoadingPage extends StatelessWidget {
+  const VLoadingPage({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Center(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 20),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(
+                Icons.sports_volleyball_rounded,
+                size: 64,
+                color: secondary.withValues(alpha: 0.5),
+              ),
+              const SizedBox(height: 24),
+              Text(
+                'VolleyStats',
+                style: VTextStyles.h2,
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'Gegevens laden...',
+                style: VTextStyles.caption,
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 40),
+              const SizedBox(
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(
+                  color: accentYellow,
+                  strokeWidth: 2,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 }

@@ -1,4 +1,4 @@
-package com.example.volleystats
+package dev.sqnder.volleystats
 
 import io.flutter.embedding.android.FlutterActivity
 
