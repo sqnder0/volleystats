@@ -19,44 +19,17 @@ At the moment, VolleyStats provides:
 - View match statistics
 - Sync upcoming matches with your calendar
 
-Everything you need to follow your teams, in one place.
-
 ## 🤔 Why?
 
-Following Belgian volleyball can mean checking different pages just to find out when your next match is, where your team stands, or how a previous match went.
+If you want to check Belgian/Flemish volleybal statistics you'd need to check the volleyscores website. Which is a js heavy website, that takes long to load and just goes back to the homepage on refreshing, is difficult to navigate etc... The app provides you everything volleyscores provides in a nicer format with more functionality.
 
-VolleyStats brings that information together in one simple app.
+## 📚️ How?
 
-Pick your favorite teams and easily keep track of their matches, rankings, and statistics.
-
-## 🏐 Follow your teams
-
-Choose the teams you care about and keep them easily accessible.
-
-Whether you're following your own team, another team in your club, or simply a team you like, VolleyStats keeps their information close by.
-
-## 📅 Never miss a match
-
-See upcoming matches for your favorite teams and add them directly to your calendar.
-
-Your volleyball schedule can live alongside the rest of your plans, without having to check the app every time.
-
-## 📊 Follow the results
-
-Check match statistics and team rankings to keep track of how your teams are performing throughout the season.
-
-## 🎯 The goal
-
-The goal of VolleyStats is simple:
-
-**Make it easier to follow Belgian volleyball.**
-
-Find your teams, check their matches, follow the rankings, and keep your volleyball schedule up to date — all in one place.
-
----
+First I had to learn flutter, which wasn't too hard, it looks a lot like Java to me, I learned flutter along with dart, which is the framework I used to build this app so I can later also compile it for IOS. I followed lots of tutorials on youtube, which led me to developing the app. Alongside the tutorials I let Z.ai make a design, in the web so I didn't have to design the color palette etc myself and could just code it in dart/flutter to speed up development.
 
 ## 📄 Installation
 Download and install the apk from the latest release: [V0.0.0-beta](https://github.com/sqnder0/volleystats/releases)
 
 
 Made with ❤️ by [Sqnder](https://github.com/sqnder0/)
+_And YES this readme is handwritten :)_
