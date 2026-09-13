@@ -27,6 +27,11 @@ import 'dart:convert';
 import 'dart:io';
 import 'favorite_service.dart';
 import 'favorite_clubs_service.dart';
+import 'date_utils.dart' as date_utils;
+import 'team_stats.dart' as team_stats;
+import 'entity_cache.dart';
+import 'logger.dart';
+import 'network_error.dart';
 import 'notification_service.dart';
 import 'theme_service.dart';
 import 'persistence_service.dart';
@@ -41,8 +46,17 @@ const String dot = "\u00B7";
 // ============================================================
 // CACHE
 // ============================================================
-final Map<String, ClubModel> _clubCache = {};
-final Map<String, TeamModel> _teamCache = {};
+final _clubCache = EntityCache<ClubModel>(
+  maxSize: 50,
+  persist: PersistenceService.saveClubs,
+  toJson: (c) => c.toJson(),
+);
+final _teamCache = EntityCache<TeamModel>(
+  maxSize: 100,
+  persist: PersistenceService.saveTeams,
+  toJson: (t) => t.toJson(),
+  persistDelay: const Duration(seconds: 3),
+);
 
 // ============================================================
 // Main
@@ -94,17 +108,17 @@ Future<void> _loadPersistentCaches() async {
   try {
     final clubsJson = await PersistenceService.loadClubs();
     clubsJson.forEach((key, value) {
-      _clubCache[key] = ClubModel.fromJson(value as Map<String, dynamic>);
+      _clubCache.restore(key, ClubModel.fromJson(value as Map<String, dynamic>));
     });
 
     final teamsJson = await PersistenceService.loadTeams();
     teamsJson.forEach((key, value) {
-      _teamCache[key] = TeamModel.fromJson(value as Map<String, dynamic>);
+      _teamCache.restore(key, TeamModel.fromJson(value as Map<String, dynamic>));
     });
 
-    debugPrint('Persistent caches loaded successfully');
+    log('Cache', 'Persistent caches loaded successfully');
   } catch (e) {
-    debugPrint('Error loading persistent caches: $e');
+    log('Cache', 'Error loading persistent caches', error: e);
   }
 }
 
@@ -332,7 +346,7 @@ class _HomePageState extends State<HomePage> {
           }
         }
       } catch (e) {
-        debugPrint('Error loading home matches for ${favTeam.label}: $e');
+        log('HomePage', 'Error loading home matches for ${favTeam.label}', error: e);
         failedNames.add(favTeam.name.isNotEmpty ? favTeam.name : favTeam.label);
       }
     }
@@ -552,7 +566,7 @@ class _HomePageState extends State<HomePage> {
         final item = items[index];
         if (item['type'] == 'header') {
           return VDateDivider(
-            label: _formatDateFull(item['label']),
+            label: date_utils.formatDateFull(item['label']),
             countLabel: '${item['count']} wed.',
           );
         } else {
@@ -583,31 +597,6 @@ class _HomePageState extends State<HomePage> {
         }
       }, childCount: items.length),
     );
-  }
-
-  String _formatDateFull(String dateStr) {
-    final parts = dateStr.split('/');
-    final dagen = ['Ma', 'Di', 'Wo', 'Do', 'Vr', 'Za', 'Zo'];
-    final maanden = [
-      'jan',
-      'feb',
-      'mrt',
-      'apr',
-      'mei',
-      'jun',
-      'jul',
-      'aug',
-      'sep',
-      'okt',
-      'nov',
-      'dec',
-    ];
-    final d = DateTime(
-      int.parse(parts[2]),
-      int.parse(parts[1]),
-      int.parse(parts[0]),
-    );
-    return '${dagen[d.weekday - 1]} ${d.day} ${maanden[d.month - 1]}';
   }
 }
 
@@ -727,7 +716,7 @@ class _SearchPageState extends State<SearchPage> {
           _isOffline = false;
         });
       } else {
-        debugPrint('API Error: ${response.statusCode} - ${response.body}');
+        log('SearchPage', 'API error ${response.statusCode}: ${response.body}');
         setState(() => _isLoading = false);
         VToastOverlay.show(
           context,
@@ -736,10 +725,10 @@ class _SearchPageState extends State<SearchPage> {
       }
     } catch (e) {
       if (isStale()) return;
-      debugPrint('Search Error: $e');
+      log('SearchPage', 'Search failed', error: e);
       setState(() {
         _isLoading = false;
-        if (e is SocketException) {
+        if (isOffline(e)) {
           _isOffline = true;
         }
       });
@@ -1309,43 +1298,6 @@ class _FavoritesPageState extends State<FavoritesPage> {
     });
   }
 
-  Map<String, dynamic>? _parseMatchDate(String dateStr) {
-    try {
-      final parts = dateStr.split('/');
-      if (parts.length != 3) return null;
-
-      final dagen = ['Ma', 'Di', 'Wo', 'Do', 'Vr', 'Za', 'Zo'];
-      final maanden = [
-        'jan',
-        'feb',
-        'mrt',
-        'apr',
-        'mei',
-        'jun',
-        'jul',
-        'aug',
-        'sep',
-        'okt',
-        'nov',
-        'dec',
-      ];
-
-      final d = DateTime(
-        int.parse(parts[2]),
-        int.parse(parts[1]),
-        int.parse(parts[0]),
-      );
-
-      return {
-        'day': dagen[d.weekday - 1],
-        'dayNum': d.day,
-        'month': maanden[d.month - 1],
-      };
-    } catch (e) {
-      return null;
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
     return Column(
@@ -1464,7 +1416,7 @@ class _FavoritesPageState extends State<FavoritesPage> {
                                     ? upcoming.first
                                     : null;
                                 final dateParts = nextMatch != null
-                                    ? _parseMatchDate(nextMatch.date)
+                                    ? date_utils.parseMatchDate(nextMatch.date)
                                     : null;
 
                                 return Padding(
@@ -1825,7 +1777,7 @@ class _ClubDetailPageState extends State<ClubDetailPage> {
           );
           _loadedTeams[loaded.teamId] = loaded;
         } catch (e) {
-          debugPrint('Refresh failed for team ${team.teamId}: $e');
+          log('ClubDetailPage', 'Refresh failed for team ${team.teamId}', error: e);
         }
       }),
     );
@@ -1868,7 +1820,7 @@ class _ClubDetailPageState extends State<ClubDetailPage> {
             }
 
             if (snapshot.hasError) {
-              debugPrint("CLUB FUTURE ERROR: ${snapshot.error}");
+              log('ClubDetailPage', 'Club future failed', error: snapshot.error);
               debugPrintStack(stackTrace: snapshot.stackTrace);
               return Text("Error", style: VTextStyles.h3);
             }
@@ -1923,19 +1875,15 @@ class _ClubDetailPageState extends State<ClubDetailPage> {
           builder: (context, snapshot) {
             if (snapshot.hasError) {
               final error = snapshot.error;
-              bool isOffline = false;
-              if (error is SocketException ||
-                  error.toString().contains('Failed host lookup')) {
-                isOffline = true;
-              }
+              final offline = error != null && isOffline(error);
 
               return Center(
                 child: VEmptyState(
-                  icon: isOffline
+                  icon: offline
                       ? Icons.wifi_off_rounded
                       : Icons.error_outline,
-                  title: isOffline ? 'Je bent offline' : 'Fout bij laden',
-                  subtitle: isOffline
+                  title: offline ? 'Je bent offline' : 'Fout bij laden',
+                  subtitle: offline
                       ? 'Controleer je verbinding om de clubgegevens te bekijken.'
                       : 'We konden de clubgegevens niet ophalen.',
                   actionLabel: 'Opnieuw proberen',
@@ -2027,8 +1975,10 @@ class _ClubDetailPageState extends State<ClubDetailPage> {
                           }),
                     builder: (context, snapshot) {
                       if (snapshot.hasError) {
-                        debugPrint(
-                          'Error loading team ${team.teamId}: ${snapshot.error}',
+                        log(
+                          'ClubDetailPage',
+                          'Error loading team ${team.teamId}',
+                          error: snapshot.error,
                         );
                         return Padding(
                           padding: const EdgeInsets.only(bottom: 8),
@@ -2211,7 +2161,7 @@ class _TeamDetailPageState extends State<TeamDetailPage> {
         }
       }
     } catch (e) {
-      debugPrint('Error syncing calendar: $e');
+      log('TeamDetailPage', 'Error syncing calendar', error: e);
       if (context.mounted) {
         VToastOverlay.show(context, 'Fout bij het openen van de agenda');
       }
@@ -2453,27 +2403,6 @@ class _TeamDetailPageState extends State<TeamDetailPage> {
     return null;
   }
 
-  /// Current consecutive win/loss streak, scanning backward from the most
-  /// recently played match. Null if no played matches are available.
-  ({int count, bool isWin})? _currentStreak(TeamModel team) {
-    int count = 0;
-    bool? isWin;
-    for (final g in team.games.reversed) {
-      final won = g.didTeamWin(team.teamId);
-      if (won == null) continue;
-      if (isWin == null) {
-        isWin = won;
-        count = 1;
-      } else if (won == isWin) {
-        count++;
-      } else {
-        break;
-      }
-    }
-    if (isWin == null) return null;
-    return (count: count, isWin: isWin);
-  }
-
   Widget _buildStatsRow(TeamModel team) {
     final row = _selfRankingRow(team);
     if (row == null) return const SizedBox.shrink();
@@ -2487,7 +2416,7 @@ class _TeamDetailPageState extends State<TeamDetailPage> {
     final setsWon = ((row['sets_won'] as num?) ?? 0).toInt();
     final setsLost = ((row['sets_lost'] as num?) ?? 0).toInt();
     final points = ((row['points'] as num?) ?? 0).toInt();
-    final streak = _currentStreak(team);
+    final streak = team_stats.currentStreak(team);
 
     return Padding(
       padding: const EdgeInsets.only(bottom: 20),
@@ -2789,9 +2718,8 @@ class ClubModel {
 
   Future<ClubModel> load({bool forceReload = false}) async {
     final key = clubId;
-    if (_clubCache.containsKey(key) && !forceReload) {
-      return _clubCache[key]!;
-    }
+    final cached = _clubCache.get(key);
+    if (cached != null && !forceReload) return cached;
 
     final uri = Uri.parse(
       '${apiBaseUrl}api/get/club?club_label=$label&club_id=$clubId',
@@ -2800,43 +2728,21 @@ class ClubModel {
       final response = await http.get(uri);
 
       if (response.statusCode != 200) {
-        debugPrint('API Error: ${response.statusCode} - ${response.body}');
+        log('ClubModel', 'API error ${response.statusCode}: ${response.body}');
         throw Exception('API Error: ${response.statusCode} - ${response.body}');
       }
       final data = jsonDecode(response.body);
       final club = ClubModel.fromJson(data);
 
-      _clubCache[key] = club;
-
-      // Cache management: Keep only last 50 entries
-      if (_clubCache.length > 50) {
-        _clubCache.remove(_clubCache.keys.first);
-      }
-
-      // Throttled persist
-      _persistClubsThrottled();
+      _clubCache.put(key, club);
       return club;
     } catch (e) {
-      debugPrint('ClubModel.load failed for $clubId: $e');
-      if (_clubCache.containsKey(key)) {
-        return _clubCache[key]!;
-      }
+      log('ClubModel', 'load failed for $clubId', error: e);
+      final fallback = _clubCache.get(key);
+      if (fallback != null) return fallback;
       rethrow;
     }
   }
-}
-
-Timer? _clubsPersistTimer;
-void _persistClubsThrottled() {
-  _clubsPersistTimer?.cancel();
-  _clubsPersistTimer = Timer(const Duration(seconds: 2), () async {
-    final Map<String, dynamic> jsonMap = {};
-    _clubCache.forEach((key, value) {
-      jsonMap[key] = value.toJson();
-    });
-    await PersistenceService.saveClubs(jsonMap);
-    debugPrint('Clubs persisted to disk');
-  });
 }
 
 class TeamModel {
@@ -2933,19 +2839,17 @@ class TeamModel {
   Future<TeamModel> load({bool forceReload = false}) async {
     final key = teamId;
 
-    if (_teamCache.containsKey(key) && !forceReload) {
-      return _teamCache[key]!;
-    }
+    final cached = _teamCache.get(key);
+    if (cached != null && !forceReload) return cached;
 
     final uri = Uri.parse(
       '${apiBaseUrl}api/get/team?label=${_cleanLabel()}&team_id=$teamId',
     );
-    debugPrint('TeamModel.load URI: $uri');
     try {
       final response = await http.get(uri).timeout(const Duration(seconds: 10));
 
       if (response.statusCode != 200) {
-        debugPrint('API Error: ${response.statusCode} - ${response.body}');
+        log('TeamModel', 'API error ${response.statusCode}: ${response.body}');
         throw Exception('API Error: ${response.statusCode} - ${response.body}');
       }
 
@@ -2956,23 +2860,13 @@ class TeamModel {
 
       final team = TeamModel.fromJson(data, isLoaded: true);
 
-      _teamCache[key] = team;
-
-      // Cache management: Keep only last 100 teams
-      if (_teamCache.length > 100) {
-        _teamCache.remove(_teamCache.keys.first);
-      }
-
-      // Throttled persist
-      _persistTeamsThrottled();
-
+      _teamCache.put(key, team);
       return team;
     } catch (e) {
-      debugPrint('TeamModel.load failed for $teamId: $e');
+      log('TeamModel', 'load failed for $teamId', error: e);
       // If we have any cached data, return it as a fallback when offline
-      if (_teamCache.containsKey(key)) {
-        return _teamCache[key]!;
-      }
+      final fallback = _teamCache.get(key);
+      if (fallback != null) return fallback;
       rethrow;
     }
   }
@@ -3015,19 +2909,6 @@ class TeamModel {
 
   @override
   int get hashCode => teamId.hashCode;
-}
-
-Timer? _teamsPersistTimer;
-void _persistTeamsThrottled() {
-  _teamsPersistTimer?.cancel();
-  _teamsPersistTimer = Timer(const Duration(seconds: 3), () async {
-    final Map<String, dynamic> jsonMap = {};
-    _teamCache.forEach((key, value) {
-      jsonMap[key] = value.toJson();
-    });
-    await PersistenceService.saveTeams(jsonMap);
-    debugPrint('Teams persisted to disk');
-  });
 }
 
 class GameModel {

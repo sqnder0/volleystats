@@ -108,7 +108,7 @@ class VTeamDetailMatchCard extends StatelessWidget {
                       borderRadius: BorderRadius.circular(6),
                     ),
                     child: Text(
-                      'TEKOMST',
+                      'TOEKOMST',
                       style: TextStyle(
                         fontSize: 10,
                         fontWeight: FontWeight.w600,

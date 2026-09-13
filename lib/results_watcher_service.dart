@@ -1,8 +1,8 @@
-import 'package:flutter/foundation.dart';
 import './main.dart';
 import './favorite_service.dart';
 import './notification_service.dart';
 import './persistence_service.dart';
+import './logger.dart';
 
 /// Periodically (and on app resume) re-fetches favorite teams and compares
 /// each game's result against the last-seen value, firing a local
@@ -60,7 +60,7 @@ class ResultsWatcherService {
             }
           }
         } catch (e) {
-          debugPrint('ResultsWatcherService: failed for ${favTeam.label}: $e');
+          log('ResultsWatcherService', 'failed for ${favTeam.label}', error: e);
         }
       }
 

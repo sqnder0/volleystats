@@ -1,6 +1,6 @@
 import 'dart:convert';
-import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'logger.dart';
 
 class PersistenceService {
   static const String _keyClubCache = 'cache_clubs_v1';
@@ -15,7 +15,7 @@ class PersistenceService {
       final decoded = jsonDecode(jsonStr);
       return decoded is Map<String, dynamic> ? decoded : {};
     } catch (e) {
-      debugPrint('Error decoding cache $key: $e');
+      log('PersistenceService', 'Error decoding cache $key', error: e);
       return {};
     }
   }
