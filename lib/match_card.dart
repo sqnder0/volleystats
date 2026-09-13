@@ -12,6 +12,10 @@ class VMatchCard extends StatelessWidget {
   final String? time;
   final bool isFavTeamHome;
   final bool showFavBorder;
+
+  /// Whether the favorite team in this match won (true), lost (false), or
+  /// unknown/not applicable (null) - drives the badge/score coloring.
+  final bool? favoriteWon;
   final VoidCallback? onTap;
 
   const VMatchCard({
@@ -24,12 +28,23 @@ class VMatchCard extends StatelessWidget {
     this.time,
     this.isFavTeamHome = false,
     this.showFavBorder = false,
+    this.favoriteWon,
     this.onTap,
   });
 
   @override
   Widget build(BuildContext context) {
     final hasResult = result != null && result!.isNotEmpty;
+    final Color resultColor = favoriteWon == true
+        ? accentGreen
+        : favoriteWon == false
+        ? accentRed
+        : secondary;
+    final String resultLabel = favoriteWon == true
+        ? 'GEWONNEN'
+        : favoriteWon == false
+        ? 'VERLOREN'
+        : 'AFGEWERKT';
 
     return GestureDetector(
       onTap: onTap,
@@ -66,17 +81,17 @@ class VMatchCard extends StatelessWidget {
                       children: [
                         VLeagueBadge(label: leagueName),
                         if (hasResult)
-                          const Row(
+                          Row(
                             mainAxisSize: MainAxisSize.min,
                             children: [
-                              _PulsingDot(),
-                              SizedBox(width: 4),
+                              _PulsingDot(color: resultColor),
+                              const SizedBox(width: 4),
                               Text(
-                                'AFGEWERKT',
+                                resultLabel,
                                 style: TextStyle(
                                   fontSize: 11,
                                   fontWeight: FontWeight.w700,
-                                  color: accentRed,
+                                  color: resultColor,
                                 ),
                               ),
                             ],
@@ -110,7 +125,14 @@ class VMatchCard extends StatelessWidget {
                         Padding(
                           padding: const EdgeInsets.symmetric(horizontal: 4),
                           child: hasResult
-                              ? Text(result!, style: VTextStyles.scoreText)
+                              ? Text(
+                                  result!,
+                                  style: VTextStyles.scoreText.copyWith(
+                                    color: favoriteWon != null
+                                        ? resultColor
+                                        : null,
+                                  ),
+                                )
                               : Text('vs', style: VTextStyles.vsText),
                         ),
                         Expanded(
@@ -165,7 +187,8 @@ class VMatchCard extends StatelessWidget {
 }
 
 class _PulsingDot extends StatefulWidget {
-  const _PulsingDot();
+  final Color color;
+  const _PulsingDot({this.color = accentRed});
 
   @override
   State<_PulsingDot> createState() => _PulsingDotState();
@@ -208,8 +231,8 @@ class _PulsingDotState extends State<_PulsingDot>
       child: Container(
         width: 7,
         height: 7,
-        decoration: const BoxDecoration(
-          color: accentRed,
+        decoration: BoxDecoration(
+          color: widget.color,
           shape: BoxShape.circle,
         ),
       ),

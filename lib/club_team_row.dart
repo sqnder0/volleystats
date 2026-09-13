@@ -8,6 +8,8 @@ class VClubTeamRow extends StatelessWidget {
   final String seriesLabel;
   final String? nextMatch;
   final String? venue;
+  final String? lastResult;
+  final bool? lastResultWon;
   final bool isFavorite;
   final VoidCallback? onTap;
   final VoidCallback? onFavoriteTap;
@@ -21,6 +23,8 @@ class VClubTeamRow extends StatelessWidget {
     this.onTap,
     this.onFavoriteTap,
     this.venue,
+    this.lastResult,
+    this.lastResultWon,
   });
 
   const VClubTeamRow.loading({super.key})
@@ -28,6 +32,8 @@ class VClubTeamRow extends StatelessWidget {
       seriesLabel = '',
       nextMatch = null,
       venue = null,
+      lastResult = null,
+      lastResultWon = null,
       isFavorite = false,
       onTap = null,
       onFavoriteTap = null;
@@ -120,6 +126,41 @@ class VClubTeamRow extends StatelessWidget {
                   ],
                 ),
               ],
+            ],
+            if (!isLoading && lastResult != null) ...[
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  Icon(
+                    lastResultWon == true
+                        ? Icons.trending_up_rounded
+                        : lastResultWon == false
+                        ? Icons.trending_down_rounded
+                        : Icons.history_rounded,
+                    size: 14,
+                    color: lastResultWon == true
+                        ? accentGreen
+                        : lastResultWon == false
+                        ? accentRed
+                        : secondary,
+                  ),
+                  const SizedBox(width: 4),
+                  Expanded(
+                    child: Text(
+                      lastResult!,
+                      style: VTextStyles.caption.copyWith(
+                        color: lastResultWon == true
+                            ? accentGreen
+                            : lastResultWon == false
+                            ? accentRed
+                            : secondary,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ],
+              ),
             ],
           ],
         ),

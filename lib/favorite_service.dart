@@ -9,6 +9,8 @@ class FavoritesService {
   static const String _keyNotificationsEnabled = 'notifications_enabled';
   static const String _keyNotificationHour = 'notification_hour';
   static const String _keyNotificationMinute = 'notification_minute';
+  static const String _keyResultNotificationsEnabled =
+      'result_notifications_enabled';
 
   static final ValueNotifier<int> favoritesNotifier = ValueNotifier<int>(0);
 
@@ -37,6 +39,18 @@ class FavoritesService {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setInt(_keyNotificationHour, time.hour);
     await prefs.setInt(_keyNotificationMinute, time.minute);
+  }
+
+  /// Independent of the daily-summary toggle above - controls whether a
+  /// notification fires when a favorite team's match result comes in.
+  static Future<bool> areResultNotificationsEnabled() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getBool(_keyResultNotificationsEnabled) ?? false;
+  }
+
+  static Future<void> setResultNotificationsEnabled(bool enabled) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_keyResultNotificationsEnabled, enabled);
   }
 
   /// Preload all favorite teams into the global cache

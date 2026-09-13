@@ -35,6 +35,7 @@ Color get skeletonColor => ThemeService.isDarkMode
 // Static Brand Colors
 const Color accentYellow = VPalette.yellow;
 const Color accentRed = VPalette.red;
+const Color accentGreen = VPalette.green;
 const Color dark = VPalette.pureDark;
 
 // Explicit Palette Access

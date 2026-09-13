@@ -44,7 +44,12 @@ class VStatCard extends StatelessWidget {
             style: VTextStyles.statNumber.copyWith(color: valueColor),
           ),
           const SizedBox(height: 2),
-          Text(label, style: VTextStyles.bodySecondary),
+          Text(
+            label,
+            style: VTextStyles.bodySecondary,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
         ],
       ),
     );

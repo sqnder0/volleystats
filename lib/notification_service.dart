@@ -35,6 +35,31 @@ class NotificationService {
     await _notificationsPlugin.cancelAll();
   }
 
+  /// Shows an immediate notification that a favorite team's match result is
+  /// in. Uses its own Android channel, separate from the daily-summary
+  /// reminders, so it isn't affected by [scheduleDailySummaries]'s
+  /// cancelAll() and can be toggled independently in Settings.
+  static Future<void> showResultNotification({
+    required int id,
+    required String title,
+    required String body,
+  }) async {
+    await _notificationsPlugin.show(
+      id,
+      title,
+      body,
+      const NotificationDetails(
+        android: AndroidNotificationDetails(
+          'match_results',
+          'Match Results',
+          channelDescription: 'Notifies when a followed team has a new result',
+          importance: Importance.high,
+          priority: Priority.high,
+        ),
+      ),
+    );
+  }
+
   static Future<void> scheduleDailySummaries(
     List<Map<String, dynamic>> matches,
     TimeOfDay preferredTime,
@@ -87,6 +112,22 @@ class NotificationService {
     required String body,
     required DateTime scheduledDateTime,
   }) async {
+    // SCHEDULE_EXACT_ALARM is a special permission on Android 13+ that the
+    // user must separately grant (declaring it in the manifest isn't
+    // enough) - without it, exactAllowWhileIdle throws. A daily summary
+    // doesn't need to-the-minute precision, so just degrade to inexact
+    // scheduling rather than crash.
+    final canScheduleExact =
+        await _notificationsPlugin
+            .resolvePlatformSpecificImplementation<
+              AndroidFlutterLocalNotificationsPlugin
+            >()
+            ?.canScheduleExactNotifications() ??
+        false;
+    final scheduleMode = canScheduleExact
+        ? AndroidScheduleMode.exactAllowWhileIdle
+        : AndroidScheduleMode.inexactAllowWhileIdle;
+
     await _notificationsPlugin.zonedSchedule(
       id,
       title,
@@ -101,7 +142,7 @@ class NotificationService {
           priority: Priority.high,
         ),
       ),
-      androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
+      androidScheduleMode: scheduleMode,
       uiLocalNotificationDateInterpretation:
           UILocalNotificationDateInterpretation.absoluteTime,
     );

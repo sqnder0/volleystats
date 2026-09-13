@@ -23,6 +23,7 @@ class VPalette {
   // Common Colors
   static const Color yellow = Color(0xFFFFC902);
   static const Color red = Color(0xFFDE2B36);
+  static const Color green = Color(0xFF2FB866);
 
   // Feature Colors
   static const Color alertDarkGold = Color(0xFF856404);

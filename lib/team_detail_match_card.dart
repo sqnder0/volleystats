@@ -13,6 +13,13 @@ class VTeamDetailMatchCard extends StatelessWidget {
   final String timeString;
   final bool isHomeTeam;
 
+  /// Whether the team whose detail page this card appears on won (true),
+  /// lost (false), or unknown (null) - drives the score coloring.
+  final bool? favoriteWon;
+
+  /// Tapping a played match (non-null) shows its per-set scores.
+  final VoidCallback? onTap;
+
   const VTeamDetailMatchCard({
     super.key,
     required this.homeTeam,
@@ -24,127 +31,145 @@ class VTeamDetailMatchCard extends StatelessWidget {
     required this.dateMonth,
     required this.timeString,
     this.isHomeTeam = false,
+    this.favoriteWon,
+    this.onTap,
   });
 
   @override
   Widget build(BuildContext context) {
     final hasResult = result != null && result!.isNotEmpty;
+    final Color? resultColor = favoriteWon == true
+        ? accentGreen
+        : favoriteWon == false
+        ? accentRed
+        : null;
 
-    return Container(
-      decoration: BoxDecoration(
-        color: cardBg,
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: cardBorder),
-      ),
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-      child: Column(
-        children: [
-          Row(
-            children: [
-              Container(
-                width: 48,
-                height: 48,
-                decoration: BoxDecoration(
-                  color: cardBgAlt,
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Expanded(child: Text(dateDay, style: VTextStyles.caption)),
-                    Expanded(
-                      child: Text(
-                        dateNum.toString(),
-                        style: VTextStyles.dateBig,
-                      ),
-                    ),
-                    Expanded(
-                      child: Text(dateMonth, style: VTextStyles.dateSmall),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(width: 10),
-
-              Expanded(
-                child: Text('$dateDay $timeString', style: VTextStyles.caption),
-              ),
-
-              // Status
-              if (hasResult)
-                Text(result!, style: VTextStyles.scoreText)
-              else
+    return GestureDetector(
+      onTap: hasResult ? onTap : null,
+      child: Container(
+        decoration: BoxDecoration(
+          color: cardBg,
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: cardBorder),
+        ),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+        child: Column(
+          children: [
+            Row(
+              children: [
                 Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 8,
-                    vertical: 3,
-                  ),
+                  width: 48,
+                  height: 48,
                   decoration: BoxDecoration(
                     color: cardBgAlt,
-                    borderRadius: BorderRadius.circular(6),
+                    borderRadius: BorderRadius.circular(10),
                   ),
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Expanded(
+                        child: Text(dateDay, style: VTextStyles.caption),
+                      ),
+                      Expanded(
+                        child: Text(
+                          dateNum.toString(),
+                          style: VTextStyles.dateBig,
+                        ),
+                      ),
+                      Expanded(
+                        child: Text(dateMonth, style: VTextStyles.dateSmall),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 10),
+
+                Expanded(
                   child: Text(
-                    'TEKOMST',
-                    style: TextStyle(
-                      fontSize: 10,
-                      fontWeight: FontWeight.w600,
-                      color: secondary,
+                    '$dateDay $timeString',
+                    style: VTextStyles.caption,
+                  ),
+                ),
+
+                // Status
+                if (hasResult)
+                  Text(
+                    result!,
+                    style: VTextStyles.scoreText.copyWith(color: resultColor),
+                  )
+                else
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 3,
+                    ),
+                    decoration: BoxDecoration(
+                      color: cardBgAlt,
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                    child: Text(
+                      'TEKOMST',
+                      style: TextStyle(
+                        fontSize: 10,
+                        fontWeight: FontWeight.w600,
+                        color: secondary,
+                      ),
                     ),
                   ),
-                ),
-            ],
-          ),
-          const SizedBox(height: 8),
+              ],
+            ),
+            const SizedBox(height: 8),
 
-          Row(
-            children: [
-              Expanded(
-                child: Text(
-                  homeTeam,
-                  style: VTextStyles.bodyBold.copyWith(
-                    color: isHomeTeam ? accentYellow : light,
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    homeTeam,
+                    style: VTextStyles.bodyBold.copyWith(
+                      color: isHomeTeam ? accentYellow : light,
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
                   ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
                 ),
-              ),
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 8),
-                child: Text(
-                  '-',
-                  style: TextStyle(fontSize: 11, color: secondary),
-                ),
-              ),
-              Expanded(
-                child: Text(
-                  awayTeam,
-                  style: VTextStyles.bodyBold.copyWith(
-                    color: !isHomeTeam ? accentYellow : light,
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 8),
+                  child: Text(
+                    '-',
+                    style: TextStyle(fontSize: 11, color: secondary),
                   ),
-                  textAlign: TextAlign.end,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
                 ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
+                Expanded(
+                  child: Text(
+                    awayTeam,
+                    style: VTextStyles.bodyBold.copyWith(
+                      color: !isHomeTeam ? accentYellow : light,
+                    ),
+                    textAlign: TextAlign.end,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
 
-          Row(
-            children: [
-              Icon(Icons.location_on_outlined, size: 10, color: secondary),
-              const SizedBox(width: 5),
-              Expanded(
-                child: Text(
-                  venue,
-                  style: VTextStyles.caption,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
+            Row(
+              children: [
+                Icon(Icons.location_on_outlined, size: 10, color: secondary),
+                const SizedBox(width: 5),
+                Expanded(
+                  child: Text(
+                    venue,
+                    style: VTextStyles.caption,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
                 ),
-              ),
-            ],
-          ),
-        ],
+              ],
+            ),
+          ],
+        ),
       ),
     );
   }

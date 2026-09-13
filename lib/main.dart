@@ -5,9 +5,11 @@ import 'match_card.dart';
 import 'search_item_club.dart';
 import 'search_item_team.dart';
 import 'favorite_team_card.dart';
+import 'favorite_club_card.dart';
 import 'club_team_row.dart';
 import 'team_detail_match_card.dart';
 import 'ranking_row.dart';
+import 'stat_card.dart';
 import 'info_card.dart';
 import 'settings_row.dart';
 import 'toggle_switch.dart';
@@ -24,11 +26,15 @@ import 'package:open_filex/open_filex.dart';
 import 'dart:convert';
 import 'dart:io';
 import 'favorite_service.dart';
+import 'favorite_clubs_service.dart';
 import 'notification_service.dart';
 import 'theme_service.dart';
 import 'persistence_service.dart';
+import 'results_watcher_service.dart';
+import 'package:workmanager/workmanager.dart';
+import 'package:share_plus/share_plus.dart';
 
-const String apiBaseUrl = "http://volleyapi.sqnder.dev/";
+const String apiBaseUrl = "https://volleyapi.sqnder.dev/";
 // const String apiBaseUrl = "http://192.168.1.43:8000/";
 const String dot = "\u00B7";
 
@@ -37,7 +43,6 @@ const String dot = "\u00B7";
 // ============================================================
 final Map<String, ClubModel> _clubCache = {};
 final Map<String, TeamModel> _teamCache = {};
-final Map<String, LeagueModel> _leagueCache = {};
 
 // ============================================================
 // Main
@@ -45,6 +50,18 @@ final Map<String, LeagueModel> _leagueCache = {};
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
   runApp(const VolleyStatsApp());
+}
+
+/// Entry point for the periodic Android background task that checks for
+/// new results. Runs in its own background isolate, so it re-initializes
+/// the notification plugin for that isolate before doing any work.
+@pragma('vm:entry-point')
+void _resultsWatcherCallbackDispatcher() {
+  Workmanager().executeTask((task, inputData) async {
+    await NotificationService.init();
+    await ResultsWatcherService.checkForNewResults();
+    return true;
+  });
 }
 
 Future<void> _initApp() async {
@@ -57,6 +74,20 @@ Future<void> _initApp() async {
 
   // Start pre-loading favorites in background
   FavoritesService.preloadFavorites();
+
+  // Best-effort periodic result check. Android's WorkManager can run this
+  // while the app is closed; iOS has no equivalent without extra native
+  // setup, so there we rely on the app-resume check instead (see
+  // _VolleyStatsAppState).
+  if (Platform.isAndroid) {
+    await Workmanager().initialize(_resultsWatcherCallbackDispatcher);
+    await Workmanager().registerPeriodicTask(
+      'results-watcher',
+      'checkForNewResults',
+      frequency: const Duration(minutes: 15),
+      constraints: Constraints(networkType: NetworkType.connected),
+    );
+  }
 }
 
 Future<void> _loadPersistentCaches() async {
@@ -71,10 +102,6 @@ Future<void> _loadPersistentCaches() async {
       _teamCache[key] = TeamModel.fromJson(value as Map<String, dynamic>);
     });
 
-    final leaguesJson = await PersistenceService.loadLeagues();
-    leaguesJson.forEach((key, value) {
-      _leagueCache[key] = LeagueModel.fromJson(value as Map<String, dynamic>);
-    });
     debugPrint('Persistent caches loaded successfully');
   } catch (e) {
     debugPrint('Error loading persistent caches: $e');
@@ -88,13 +115,31 @@ class VolleyStatsApp extends StatefulWidget {
   State<VolleyStatsApp> createState() => _VolleyStatsAppState();
 }
 
-class _VolleyStatsAppState extends State<VolleyStatsApp> {
+class _VolleyStatsAppState extends State<VolleyStatsApp>
+    with WidgetsBindingObserver {
   late Future<void> _initFuture;
 
   @override
   void initState() {
     super.initState();
     _initFuture = _initApp();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      // The reliable cross-platform path: whenever the user actually opens
+      // the app, check favorites for new results. The WorkManager task in
+      // _initApp covers the Android-closed-app case on top of this.
+      ResultsWatcherService.checkForNewResults();
+    }
   }
 
   @override
@@ -225,6 +270,7 @@ class HomePage extends StatefulWidget {
 class _HomePageState extends State<HomePage> {
   String _filter = 'all';
   late Future<List<Map<String, dynamic>>> _homeMatchesFuture;
+  List<String> _failedFavoriteNames = [];
 
   @override
   void initState() {
@@ -239,22 +285,33 @@ class _HomePageState extends State<HomePage> {
     super.dispose();
   }
 
-  void _loadHomeMatches() {
+  void _loadHomeMatches({bool forceReload = false}) {
     setState(() {
-      _homeMatchesFuture = _fetchHomeMatches();
+      _homeMatchesFuture = _fetchHomeMatches(forceReload: forceReload);
     });
   }
 
-  Future<List<Map<String, dynamic>>> _fetchHomeMatches() async {
+  Future<void> _handleRefresh() async {
+    _loadHomeMatches(forceReload: true);
+    await _homeMatchesFuture;
+  }
+
+  Future<List<Map<String, dynamic>>> _fetchHomeMatches({
+    bool forceReload = false,
+  }) async {
     final favorites = await FavoritesService.loadFavorites();
-    if (favorites.isEmpty) return [];
+    final List<String> failedNames = [];
+    if (favorites.isEmpty) {
+      if (mounted) setState(() => _failedFavoriteNames = []);
+      return [];
+    }
 
     final List<Map<String, dynamic>> allMatches = [];
     final Set<String> matchCodes = {};
 
     for (var favTeam in favorites) {
       try {
-        final fullTeam = await favTeam.load();
+        final fullTeam = await favTeam.load(forceReload: forceReload);
         for (var game in fullTeam.games) {
           if (!matchCodes.contains(game.matchCode)) {
             matchCodes.add(game.matchCode);
@@ -267,6 +324,7 @@ class _HomePageState extends State<HomePage> {
               'time': game.date, // DD/MM/YYYY
               'match_time': game.time,
               'is_fav_home': game.homeTeam.teamId == favTeam.teamId,
+              'favorite_won': game.didTeamWin(favTeam.teamId),
               'fav_name': fullTeam.name,
               'team_model': fullTeam,
               'date_obj': _parseDate(game.date),
@@ -275,8 +333,11 @@ class _HomePageState extends State<HomePage> {
         }
       } catch (e) {
         debugPrint('Error loading home matches for ${favTeam.label}: $e');
+        failedNames.add(favTeam.name.isNotEmpty ? favTeam.name : favTeam.label);
       }
     }
+
+    if (mounted) setState(() => _failedFavoriteNames = failedNames);
 
     // Sort by date and then time
     allMatches.sort((a, b) {
@@ -332,98 +393,135 @@ class _HomePageState extends State<HomePage> {
 
   @override
   Widget build(BuildContext context) {
-    return CustomScrollView(
-      slivers: [
-        SliverPadding(
-          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-          sliver: SliverList(
-            delegate: SliverChildListDelegate([
-              // Header
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text('VolleyStats', style: VTextStyles.h1),
-                      const SizedBox(height: 2),
-                    ],
-                  ),
-                ],
-              ),
-              const SizedBox(height: 20),
+    return RefreshIndicator(
+      onRefresh: _handleRefresh,
+      color: accentYellow,
+      child: CustomScrollView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        slivers: [
+          SliverPadding(
+            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+            sliver: SliverList(
+              delegate: SliverChildListDelegate([
+                // Header
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('VolleyStats', style: VTextStyles.h1),
+                        const SizedBox(height: 2),
+                      ],
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 20),
 
-              // Filters
-              Row(
-                children: [
-                  VFilterTab(
-                    label: 'Alles',
-                    isActive: _filter == 'all',
-                    onTap: () => setState(() => _filter = 'all'),
+                // Filters
+                Row(
+                  children: [
+                    VFilterTab(
+                      label: 'Alles',
+                      isActive: _filter == 'all',
+                      onTap: () => setState(() => _filter = 'all'),
+                    ),
+                    const SizedBox(width: 8),
+                    VFilterTab(
+                      label: 'Deze week',
+                      isActive: _filter == 'week',
+                      onTap: () => setState(() => _filter = 'week'),
+                    ),
+                    const SizedBox(width: 8),
+                    VFilterTab(
+                      label: 'Deze maand',
+                      isActive: _filter == 'month',
+                      onTap: () => setState(() => _filter = 'month'),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 18),
+                if (_failedFavoriteNames.isNotEmpty)
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    margin: const EdgeInsets.only(bottom: 16),
+                    decoration: BoxDecoration(
+                      color: accentRed.withValues(alpha: 0.1),
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(
+                        color: accentRed.withValues(alpha: 0.3),
+                      ),
+                    ),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Icon(
+                          Icons.error_outline,
+                          size: 16,
+                          color: accentRed,
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            'Kon wedstrijden niet laden voor: '
+                            '${_failedFavoriteNames.join(', ')}',
+                            style: VTextStyles.captionBold.copyWith(
+                              color: accentRed,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
-                  const SizedBox(width: 8),
-                  VFilterTab(
-                    label: 'Deze week',
-                    isActive: _filter == 'week',
-                    onTap: () => setState(() => _filter = 'week'),
-                  ),
-                  const SizedBox(width: 8),
-                  VFilterTab(
-                    label: 'Deze maand',
-                    isActive: _filter == 'month',
-                    onTap: () => setState(() => _filter = 'month'),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 18),
-            ]),
+              ]),
+            ),
           ),
-        ),
-        FutureBuilder<List<Map<String, dynamic>>>(
-          future: _homeMatchesFuture,
-          builder: (context, snapshot) {
-            if (snapshot.connectionState == ConnectionState.waiting) {
-              return const SliverToBoxAdapter(
-                child: Center(
-                  child: Padding(
-                    padding: EdgeInsets.only(top: 40),
-                    child: CircularProgressIndicator(color: accentYellow),
+          FutureBuilder<List<Map<String, dynamic>>>(
+            future: _homeMatchesFuture,
+            builder: (context, snapshot) {
+              if (snapshot.connectionState == ConnectionState.waiting) {
+                return const SliverToBoxAdapter(
+                  child: Center(
+                    child: Padding(
+                      padding: EdgeInsets.only(top: 40),
+                      child: CircularProgressIndicator(color: accentYellow),
+                    ),
                   ),
-                ),
-              );
-            }
+                );
+              }
 
-            final matches = snapshot.data ?? [];
-            if (matches.isEmpty) {
-              return const SliverToBoxAdapter(
-                child: VEmptyState(
-                  icon: Icons.sports_volleyball_outlined,
-                  title: 'Geen wedstrijden',
-                  subtitle:
-                      'Volg teams om hun wedstrijden hier te zien verschijnen.',
-                ),
-              );
-            }
+              final matches = snapshot.data ?? [];
+              if (matches.isEmpty) {
+                return const SliverToBoxAdapter(
+                  child: VEmptyState(
+                    icon: Icons.sports_volleyball_outlined,
+                    title: 'Geen wedstrijden',
+                    subtitle:
+                        'Volg teams om hun wedstrijden hier te zien verschijnen.',
+                  ),
+                );
+              }
 
-            final filtered = _applyFilter(matches);
-            if (filtered.isEmpty) {
-              return const SliverToBoxAdapter(
-                child: VEmptyState(
-                  icon: Icons.event_busy_outlined,
-                  title: 'Geen wedstrijden',
-                  subtitle: 'Geen wedstrijden gevonden voor deze periode.',
-                ),
-              );
-            }
+              final filtered = _applyFilter(matches);
+              if (filtered.isEmpty) {
+                return const SliverToBoxAdapter(
+                  child: VEmptyState(
+                    icon: Icons.event_busy_outlined,
+                    title: 'Geen wedstrijden',
+                    subtitle: 'Geen wedstrijden gevonden voor deze periode.',
+                  ),
+                );
+              }
 
-            return SliverPadding(
-              padding: const EdgeInsets.symmetric(horizontal: 20),
-              sliver: _buildSliverMatchList(filtered),
-            );
-          },
-        ),
-        const SliverToBoxAdapter(child: SizedBox(height: 24)),
-      ],
+              return SliverPadding(
+                padding: const EdgeInsets.symmetric(horizontal: 20),
+                sliver: _buildSliverMatchList(filtered),
+              );
+            },
+          ),
+          const SliverToBoxAdapter(child: SizedBox(height: 24)),
+        ],
+      ),
     );
   }
 
@@ -470,6 +568,7 @@ class _HomePageState extends State<HomePage> {
               time: m['match_time'],
               isFavTeamHome: m['is_fav_home'] == true,
               showFavBorder: true,
+              favoriteWon: m['favorite_won'] as bool?,
               onTap: () => Navigator.push(
                 context,
                 MaterialPageRoute(
@@ -525,7 +624,6 @@ class _SearchPageState extends State<SearchPage> {
   Timer? _debounce;
 
   bool _isLoading = false;
-  bool _hasSearched = false;
   bool _isOffline = false;
   List<ClubModel> _apiClubs = [];
   List<TeamModel> _apiTeams = [];
@@ -555,11 +653,14 @@ class _SearchPageState extends State<SearchPage> {
   }
 
   Future<void> _performSearch(String query) async {
+    // Guards against a slow, now-stale request overwriting results for
+    // whatever the user has since typed.
+    bool isStale() => !mounted || _query != query;
+
     if (query.length < 2) {
       setState(() {
         _apiClubs = [];
         _apiTeams = [];
-        _hasSearched = false;
         _isLoading = false;
         _isOffline = false;
       });
@@ -568,7 +669,6 @@ class _SearchPageState extends State<SearchPage> {
 
     setState(() {
       _isLoading = true;
-      _hasSearched = true;
       _isOffline = false;
     });
 
@@ -580,6 +680,7 @@ class _SearchPageState extends State<SearchPage> {
           throw const SocketException('No address found');
         }
       } catch (_) {
+        if (isStale()) return;
         setState(() {
           _isOffline = true;
           _isLoading = false;
@@ -591,6 +692,8 @@ class _SearchPageState extends State<SearchPage> {
         '${apiBaseUrl}api/search?q=${Uri.encodeComponent(query)}',
       );
       final response = await http.get(uri).timeout(const Duration(seconds: 5));
+
+      if (isStale()) return;
 
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
@@ -611,6 +714,7 @@ class _SearchPageState extends State<SearchPage> {
 
         // Check favorites
         final favs = await FavoritesService.loadFavorites();
+        if (isStale()) return;
         final favIds = favs.map((f) => f.teamId).toSet();
         for (var t in teams) {
           t.isFavorite = favIds.contains(t.teamId);
@@ -631,6 +735,7 @@ class _SearchPageState extends State<SearchPage> {
         );
       }
     } catch (e) {
+      if (isStale()) return;
       debugPrint('Search Error: $e');
       setState(() {
         _isLoading = false;
@@ -654,8 +759,6 @@ class _SearchPageState extends State<SearchPage> {
 
   @override
   Widget build(BuildContext context) {
-    final showResults = _hasSearched;
-
     return ListView(
       padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
       children: [
@@ -1174,23 +1277,35 @@ class FavoritesPage extends StatefulWidget {
 
 class _FavoritesPageState extends State<FavoritesPage> {
   late Future<List<TeamModel>> _favoritesFuture;
+  late Future<List<ClubModel>> _favoriteClubsFuture;
 
   @override
   void initState() {
     super.initState();
     _loadFavorites();
+    _loadFavoriteClubs();
     FavoritesService.favoritesNotifier.addListener(_loadFavorites);
+    FavoriteClubsService.favoriteClubsNotifier.addListener(_loadFavoriteClubs);
   }
 
   @override
   void dispose() {
     FavoritesService.favoritesNotifier.removeListener(_loadFavorites);
+    FavoriteClubsService.favoriteClubsNotifier.removeListener(
+      _loadFavoriteClubs,
+    );
     super.dispose();
   }
 
   void _loadFavorites() {
     setState(() {
       _favoritesFuture = FavoritesService.loadFavorites();
+    });
+  }
+
+  void _loadFavoriteClubs() {
+    setState(() {
+      _favoriteClubsFuture = FavoriteClubsService.loadFavorites();
     });
   }
 
@@ -1248,88 +1363,157 @@ class _FavoritesPageState extends State<FavoritesPage> {
           ),
         ),
         Expanded(
-          child: FutureBuilder<List<TeamModel>>(
-            future: _favoritesFuture,
-            builder: (context, snapshot) {
-              if (snapshot.connectionState == ConnectionState.waiting) {
-                return const Center(child: CircularProgressIndicator());
-              }
+          child: FutureBuilder<List<ClubModel>>(
+            future: _favoriteClubsFuture,
+            builder: (context, clubsSnapshot) {
+              final clubs = clubsSnapshot.data ?? [];
 
-              final favorites = snapshot.data ?? [];
+              return FutureBuilder<List<TeamModel>>(
+                future: _favoritesFuture,
+                builder: (context, teamsSnapshot) {
+                  final teamsLoading =
+                      teamsSnapshot.connectionState ==
+                      ConnectionState.waiting;
+                  final favorites = teamsSnapshot.data ?? [];
 
-              if (favorites.isEmpty) {
-                return const Center(
-                  child: VEmptyState(
-                    icon: Icons.star_border,
-                    title: 'Geen favorieten',
-                    subtitle:
-                        'Voeg teams toe aan je favorieten om ze hier te bekijken.',
-                  ),
-                );
-              }
+                  if (!teamsLoading && favorites.isEmpty && clubs.isEmpty) {
+                    return const Center(
+                      child: VEmptyState(
+                        icon: Icons.star_border,
+                        title: 'Geen favorieten',
+                        subtitle:
+                            'Voeg clubs of teams toe aan je favorieten om ze hier te bekijken.',
+                      ),
+                    );
+                  }
 
-              return ListView.builder(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 20,
-                  vertical: 8,
-                ),
-                itemCount: favorites.length,
-                itemBuilder: (context, index) {
-                  final savedTeam = favorites[index];
+                  return ListView(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 20,
+                      vertical: 8,
+                    ),
+                    children: [
+                      if (clubs.isNotEmpty) ...[
+                        Text('CLUBS', style: VTextStyles.smallLabel),
+                        const SizedBox(height: 8),
+                        ...clubs.map(
+                          (club) => Padding(
+                            padding: const EdgeInsets.only(bottom: 12),
+                            child: FutureBuilder<ClubModel>(
+                              future: club.load(),
+                              builder: (context, clubSnapshot) {
+                                final fullClub = clubSnapshot.data;
 
-                  return FutureBuilder<TeamModel>(
-                    future: savedTeam.load(),
-                    builder: (context, teamSnapshot) {
-                      if (!teamSnapshot.hasData) {
-                        return const Padding(
-                          padding: EdgeInsets.only(bottom: 12),
-                          child: VClubTeamRow.loading(),
-                        );
-                      }
-
-                      final fullTeam = teamSnapshot.data!;
-                      final hasMatch = fullTeam.games.isNotEmpty;
-                      final nextMatch = hasMatch ? fullTeam.games.first : null;
-                      final dateParts = nextMatch != null
-                          ? _parseMatchDate(nextMatch.date)
-                          : null;
-
-                      return Padding(
-                        padding: const EdgeInsets.only(bottom: 12),
-                        child: VFavoriteTeamCard(
-                          teamName: fullTeam.name,
-                          leagueName: fullTeam.leagueName,
-                          hasUpcomingMatch: hasMatch,
-                          nextHomeTeam: nextMatch?.homeTeam.name,
-                          nextAwayTeam: nextMatch?.awayTeam.name,
-                          nextTime: nextMatch?.time,
-                          nextDateDay: dateParts?['day'],
-                          nextDateDayNum: dateParts?['dayNum'],
-                          nextDateMonth: dateParts?['month'],
-                          onTap: () => Navigator.push(
-                            context,
-                            MaterialPageRoute(
-                              builder: (_) => TeamDetailPage(
-                                team: fullTeam,
-                                preLoadName: fullTeam.name,
-                              ),
+                                return VFavoriteClubCard(
+                                  clubName: club.label,
+                                  competitionTeamCount:
+                                      fullClub?.compTeams.length,
+                                  cupTeamCount: fullClub?.cupTeams.length,
+                                  onTap: () => Navigator.push(
+                                    context,
+                                    MaterialPageRoute(
+                                      builder: (_) =>
+                                          ClubDetailPage(club: club),
+                                    ),
+                                  ),
+                                  onRemoveTap: () async {
+                                    await FavoriteClubsService.removeFavorite(
+                                      club.clubId,
+                                    );
+                                    _loadFavoriteClubs();
+                                    if (context.mounted) {
+                                      VToastOverlay.show(
+                                        context,
+                                        'Club verwijderd uit favorieten',
+                                      );
+                                    }
+                                  },
+                                );
+                              },
                             ),
                           ),
-                          onRemoveTap: () async {
-                            await FavoritesService.removeFavorite(
-                              fullTeam.teamId,
-                            );
-                            _loadFavorites();
-                            if (context.mounted) {
-                              VToastOverlay.show(
-                                context,
-                                'Team verwijderd uit favorieten',
-                              );
-                            }
-                          },
                         ),
-                      );
-                    },
+                        const SizedBox(height: 8),
+                      ],
+                      if (favorites.isNotEmpty || teamsLoading) ...[
+                        Text('TEAMS', style: VTextStyles.smallLabel),
+                        const SizedBox(height: 8),
+                        if (teamsLoading)
+                          const Padding(
+                            padding: EdgeInsets.symmetric(vertical: 24),
+                            child: Center(child: CircularProgressIndicator()),
+                          )
+                        else
+                          ...favorites.map((savedTeam) {
+                            return FutureBuilder<TeamModel>(
+                              future: savedTeam.load(),
+                              builder: (context, teamSnapshot) {
+                                if (!teamSnapshot.hasData) {
+                                  return const Padding(
+                                    padding: EdgeInsets.only(bottom: 12),
+                                    child: VClubTeamRow.loading(),
+                                  );
+                                }
+
+                                final fullTeam = teamSnapshot.data!;
+                                final upcoming = fullTeam.games
+                                    .where((g) => g.result.isEmpty)
+                                    .toList();
+                                final hasMatch = upcoming.isNotEmpty;
+                                final nextMatch = hasMatch
+                                    ? upcoming.first
+                                    : null;
+                                final dateParts = nextMatch != null
+                                    ? _parseMatchDate(nextMatch.date)
+                                    : null;
+
+                                return Padding(
+                                  padding: const EdgeInsets.only(bottom: 12),
+                                  child: VFavoriteTeamCard(
+                                    teamName: fullTeam.name,
+                                    leagueName: fullTeam.leagueName,
+                                    hasUpcomingMatch: hasMatch,
+                                    nextHomeTeam: nextMatch?.homeTeam.name,
+                                    nextAwayTeam: nextMatch?.awayTeam.name,
+                                    nextTime: nextMatch?.time,
+                                    nextDateDay: dateParts?['day'],
+                                    nextDateDayNum: dateParts?['dayNum'],
+                                    nextDateMonth: dateParts?['month'],
+                                    onTap: () => Navigator.push(
+                                      context,
+                                      MaterialPageRoute(
+                                        builder: (_) => TeamDetailPage(
+                                          team: fullTeam,
+                                          preLoadName: fullTeam.name,
+                                        ),
+                                      ),
+                                    ),
+                                    onRemoveTap: () async {
+                                      await FavoritesService.removeFavorite(
+                                        fullTeam.teamId,
+                                      );
+                                      _loadFavorites();
+                                      if (context.mounted) {
+                                        VToastOverlay.show(
+                                          context,
+                                          'Team verwijderd uit favorieten',
+                                        );
+                                      }
+                                    },
+                                  ),
+                                );
+                              },
+                            );
+                          }),
+                      ] else if (clubs.isNotEmpty)
+                        Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 4),
+                          child: Text(
+                            'Nog geen team favorieten.',
+                            style: VTextStyles.caption,
+                          ),
+                        ),
+                    ],
                   );
                 },
               );
@@ -1350,6 +1534,7 @@ class MorePage extends StatefulWidget {
 
 class _MorePageState extends State<MorePage> {
   bool _notificationsEnabled = false;
+  bool _resultNotificationsEnabled = false;
   TimeOfDay _notificationTime = const TimeOfDay(hour: 8, minute: 0);
 
   @override
@@ -1360,10 +1545,13 @@ class _MorePageState extends State<MorePage> {
 
   Future<void> _loadSettings() async {
     final enabled = await FavoritesService.areNotificationsEnabled();
+    final resultEnabled =
+        await FavoritesService.areResultNotificationsEnabled();
     final time = await FavoritesService.getNotificationTime();
     if (mounted) {
       setState(() {
         _notificationsEnabled = enabled;
+        _resultNotificationsEnabled = resultEnabled;
         _notificationTime = time;
       });
     }
@@ -1377,6 +1565,16 @@ class _MorePageState extends State<MorePage> {
       FavoritesService.preloadFavorites();
     } else {
       await NotificationService.cancelAll();
+    }
+  }
+
+  Future<void> _toggleResultNotifications(bool value) async {
+    await FavoritesService.setResultNotificationsEnabled(value);
+    setState(() => _resultNotificationsEnabled = value);
+    if (value) {
+      // Seed/refresh the baseline immediately rather than waiting for the
+      // next periodic check or app resume.
+      ResultsWatcherService.checkForNewResults();
     }
   }
 
@@ -1444,6 +1642,17 @@ class _MorePageState extends State<MorePage> {
                 'Ontvang het overzicht om ${_notificationTime.format(context)}',
             onTap: _pickTime,
           ),
+        VSettingsRow(
+          icon: Icons.sports_volleyball_outlined,
+          iconBgColor: accentGreen.withValues(alpha: 0.12),
+          iconColor: accentGreen,
+          title: 'Resultaat meldingen',
+          subtitle: Platform.isIOS
+              ? 'Melding bij een nieuwe uitslag (niet gegarandeerd als de app gesloten is)'
+              : 'Melding bij een nieuwe uitslag van je favoriete teams',
+          trailing: VToggleSwitch(isOn: _resultNotificationsEnabled),
+          onTap: () => _toggleResultNotifications(!_resultNotificationsEnabled),
+        ),
         VSettingsRow(
           icon: Icons.dark_mode_outlined,
           iconBgColor: blueInfo.withValues(alpha: 0.12),
@@ -1578,6 +1787,7 @@ class ClubDetailPage extends StatefulWidget {
 
 class _ClubDetailPageState extends State<ClubDetailPage> {
   bool _isCompetitionTab = true;
+  bool _isFavorite = false;
   late Future<ClubModel> _clubFuture;
   final Map<String, TeamModel> _loadedTeams = {};
 
@@ -1585,6 +1795,46 @@ class _ClubDetailPageState extends State<ClubDetailPage> {
   void initState() {
     super.initState();
     _clubFuture = widget.club.load();
+    _checkFavorite();
+  }
+
+  Future<void> _checkFavorite() async {
+    final isFav = await FavoriteClubsService.isFavorite(widget.club.clubId);
+    if (mounted) setState(() => _isFavorite = isFav);
+  }
+
+  Future<void> _handleRefresh() async {
+    final freshClub = await widget.club.load(forceReload: true);
+
+    // Reload every visible team's row data up front and populate the cache
+    // directly, rather than flipping a "force reload" flag that the team
+    // FutureBuilders read at build time - by the time this function's
+    // `await` above resumes and could reset such a flag, the outer
+    // FutureBuilder here has *already* rebuilt (its own internal listener
+    // on the same future runs after this one, since it only subscribes on
+    // the next frame - after this continuation, not before), so a
+    // flag-based approach silently reads back `false` and never actually
+    // re-fetches team data.
+    final allTeams = [...freshClub.compTeams, ...freshClub.cupTeams];
+    await Future.wait(
+      allTeams.map((team) async {
+        try {
+          final loaded = await team.load(forceReload: true);
+          loaded.isFavorite = await FavoritesService.isFavorite(
+            loaded.teamId,
+          );
+          _loadedTeams[loaded.teamId] = loaded;
+        } catch (e) {
+          debugPrint('Refresh failed for team ${team.teamId}: $e');
+        }
+      }),
+    );
+
+    if (mounted) {
+      setState(() {
+        _clubFuture = Future.value(freshClub);
+      });
+    }
   }
 
   @override
@@ -1637,196 +1887,252 @@ class _ClubDetailPageState extends State<ClubDetailPage> {
             );
           },
         ),
+        actions: [
+          Padding(
+            padding: const EdgeInsets.only(right: 16),
+            child: GestureDetector(
+              onTap: () async {
+                final newStatus = await FavoriteClubsService.toggleFavorite(
+                  widget.club,
+                );
+                setState(() => _isFavorite = newStatus);
+                if (mounted) {
+                  VToastOverlay.show(
+                    context,
+                    newStatus
+                        ? 'Toegevoegd aan favorieten'
+                        : 'Verwijderd uit favorieten',
+                  );
+                }
+              },
+              child: Icon(
+                _isFavorite ? Icons.star : Icons.star_border,
+                size: 18,
+                color: accentYellow,
+              ),
+            ),
+          ),
+        ],
       ),
 
-      body: FutureBuilder<ClubModel>(
-        future: _clubFuture,
-        builder: (context, snapshot) {
-          if (snapshot.hasError) {
-            final error = snapshot.error;
-            bool isOffline = false;
-            if (error is SocketException ||
-                error.toString().contains('Failed host lookup')) {
-              isOffline = true;
+      body: RefreshIndicator(
+        onRefresh: _handleRefresh,
+        color: accentYellow,
+        child: FutureBuilder<ClubModel>(
+          future: _clubFuture,
+          builder: (context, snapshot) {
+            if (snapshot.hasError) {
+              final error = snapshot.error;
+              bool isOffline = false;
+              if (error is SocketException ||
+                  error.toString().contains('Failed host lookup')) {
+                isOffline = true;
+              }
+
+              return Center(
+                child: VEmptyState(
+                  icon: isOffline
+                      ? Icons.wifi_off_rounded
+                      : Icons.error_outline,
+                  title: isOffline ? 'Je bent offline' : 'Fout bij laden',
+                  subtitle: isOffline
+                      ? 'Controleer je verbinding om de clubgegevens te bekijken.'
+                      : 'We konden de clubgegevens niet ophalen.',
+                  actionLabel: 'Opnieuw proberen',
+                  onActionTap: () {
+                    setState(() {
+                      _clubFuture = widget.club.load();
+                    });
+                  },
+                ),
+              );
             }
 
-            return Center(
-              child: VEmptyState(
-                icon: isOffline ? Icons.wifi_off_rounded : Icons.error_outline,
-                title: isOffline ? 'Je bent offline' : 'Fout bij laden',
-                subtitle: isOffline
-                    ? 'Controleer je verbinding om de clubgegevens te bekijken.'
-                    : 'We konden de clubgegevens niet ophalen.',
-                actionLabel: 'Opnieuw proberen',
-                onActionTap: () {
-                  setState(() {
-                    _clubFuture = widget.club.load();
-                  });
-                },
-              ),
-            );
-          }
+            if (!snapshot.hasData) {
+              return const Center(
+                child: CircularProgressIndicator(color: accentYellow),
+              );
+            }
 
-          if (!snapshot.hasData) {
-            return const Center(
-              child: CircularProgressIndicator(color: accentYellow),
-            );
-          }
+            final club = snapshot.data!;
 
-          final club = snapshot.data!;
+            final compTeams = club.compTeams;
+            final cupTeams = club.cupTeams;
 
-          final compTeams = club.compTeams;
-          final cupTeams = club.cupTeams;
+            final teamsToShow = _isCompetitionTab ? compTeams : cupTeams;
 
-          final teamsToShow = _isCompetitionTab ? compTeams : cupTeams;
-
-          return ListView(
-            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
-            children: [
-              // INFO CARDS
-              Row(
-                children: [
-                  Expanded(
-                    child: VInfoCard(
-                      label: 'Voorzitter',
-                      value: club.chairman,
-                      icon: Icons.person_outline,
+            return ListView(
+              physics: const AlwaysScrollableScrollPhysics(),
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+              children: [
+                // INFO CARDS
+                Row(
+                  children: [
+                    Expanded(
+                      child: VInfoCard(
+                        label: 'Voorzitter',
+                        value: club.chairman,
+                        icon: Icons.person_outline,
+                      ),
                     ),
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: VInfoCard(
-                      label: 'Secretaris',
-                      value: club.secretary,
-                      icon: Icons.edit_outlined,
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: VInfoCard(
+                        label: 'Secretaris',
+                        value: club.secretary,
+                        icon: Icons.edit_outlined,
+                      ),
                     ),
-                  ),
-                ],
-              ),
+                  ],
+                ),
 
-              const SizedBox(height: 8),
+                const SizedBox(height: 8),
 
-              VInfoCard(
-                label: 'Website',
-                value: club.website,
-                icon: Icons.language,
-              ),
+                VInfoCard(
+                  label: 'Website',
+                  value: club.website,
+                  icon: Icons.language,
+                ),
 
-              const SizedBox(height: 20),
+                const SizedBox(height: 20),
 
-              // TOGGLE
-              VToggleTabs(
-                leftLabel: 'Competitie',
-                rightLabel: 'Beker',
-                leftCount: compTeams.length,
-                rightCount: cupTeams.length,
-                isLeftActive: _isCompetitionTab,
-                onLeftTap: () => setState(() => _isCompetitionTab = true),
-                onRightTap: () => setState(() => _isCompetitionTab = false),
-              ),
+                // TOGGLE
+                VToggleTabs(
+                  leftLabel: 'Competitie',
+                  rightLabel: 'Beker',
+                  leftCount: compTeams.length,
+                  rightCount: cupTeams.length,
+                  isLeftActive: _isCompetitionTab,
+                  onLeftTap: () => setState(() => _isCompetitionTab = true),
+                  onRightTap: () => setState(() => _isCompetitionTab = false),
+                ),
 
-              const SizedBox(height: 16),
+                const SizedBox(height: 16),
 
-              // LIST
-              ...teamsToShow.map((team) {
-                final cachedTeam = _loadedTeams[team.teamId];
+                // LIST
+                ...teamsToShow.map((team) {
+                  final cachedTeam = _loadedTeams[team.teamId];
 
-                return FutureBuilder<TeamModel>(
-                  key: ValueKey('${_isCompetitionTab}_${team.teamId}'),
-                  future: cachedTeam != null
-                      ? Future.value(cachedTeam)
-                      : team.load().then((loaded) async {
-                          loaded.isFavorite = await FavoritesService.isFavorite(
-                            loaded.teamId,
-                          );
-                          _loadedTeams[loaded.teamId] = loaded;
-                          return loaded;
-                        }),
-                  builder: (context, snapshot) {
-                    if (snapshot.hasError) {
-                      debugPrint(
-                        'Error loading team ${team.teamId}: ${snapshot.error}',
-                      );
+                  return FutureBuilder<TeamModel>(
+                    key: ValueKey('${_isCompetitionTab}_${team.teamId}'),
+                    future: cachedTeam != null
+                        ? Future.value(cachedTeam)
+                        : team.load().then((loaded) async {
+                            loaded.isFavorite =
+                                await FavoritesService.isFavorite(
+                                  loaded.teamId,
+                                );
+                            _loadedTeams[loaded.teamId] = loaded;
+                            return loaded;
+                          }),
+                    builder: (context, snapshot) {
+                      if (snapshot.hasError) {
+                        debugPrint(
+                          'Error loading team ${team.teamId}: ${snapshot.error}',
+                        );
+                        return Padding(
+                          padding: const EdgeInsets.only(bottom: 8),
+                          child: VClubTeamRow(
+                            teamName: 'Fout bij laden',
+                            seriesLabel: team.label,
+                            onTap: () {
+                              setState(() {
+                                _loadedTeams.remove(team.teamId);
+                              });
+                            },
+                          ),
+                        );
+                      }
+
+                      if (!snapshot.hasData) {
+                        return const Padding(
+                          padding: EdgeInsets.only(bottom: 8),
+                          child: VClubTeamRow.loading(),
+                        );
+                      }
+
+                      final loadedTeam = snapshot.data!;
+                      var nextMatchString = "Geen volgende wedstrijd";
+                      String? venue;
+                      String? lastResultString;
+                      bool? lastResultWon;
+
+                      // The schedule table lists every match of the season in
+                      // order, so games.first is only "next" before the
+                      // season starts - filter to unplayed matches instead of
+                      // blindly taking the first one.
+                      final upcoming = loadedTeam.games
+                          .where((g) => g.result.isEmpty)
+                          .toList();
+                      if (upcoming.isNotEmpty) {
+                        final nextMatch = upcoming.first;
+                        venue = nextMatch.venue;
+                        int last = nextMatch.date.length;
+
+                        String date = (last == 10)
+                            ? nextMatch.date.substring(0, (last - 5))
+                            : nextMatch.date;
+
+                        nextMatchString =
+                            "$date $dot ${nextMatch.time} $dot"
+                            "${nextMatch.homeTeam.name} - "
+                            "${nextMatch.awayTeam.name}";
+                      }
+
+                      final played = loadedTeam.games
+                          .where((g) => g.result.isNotEmpty)
+                          .toList();
+                      if (played.isNotEmpty) {
+                        final lastMatch = played.last;
+                        lastResultWon = lastMatch.didTeamWin(loadedTeam.teamId);
+                        lastResultString =
+                            "${lastMatch.homeTeam.name} ${lastMatch.result} "
+                            "${lastMatch.awayTeam.name}";
+                      }
+
                       return Padding(
                         padding: const EdgeInsets.only(bottom: 8),
                         child: VClubTeamRow(
-                          teamName: 'Fout bij laden',
-                          seriesLabel: team.label,
-                          onTap: () {
+                          teamName: loadedTeam.name,
+                          seriesLabel: loadedTeam.leagueName,
+                          nextMatch: nextMatchString,
+                          venue: venue,
+                          lastResult: lastResultString,
+                          lastResultWon: lastResultWon,
+                          isFavorite: loadedTeam.isFavorite,
+                          onTap: () => Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (_) => TeamDetailPage(
+                                team: loadedTeam,
+                                preLoadName: loadedTeam.name,
+                              ),
+                            ),
+                          ),
+                          onFavoriteTap: () async {
+                            final newStatus =
+                                await FavoritesService.toggleFavorite(
+                                  loadedTeam,
+                                );
                             setState(() {
-                              _loadedTeams.remove(team.teamId);
+                              loadedTeam.isFavorite = newStatus;
                             });
+                            if (mounted) {
+                              VToastOverlay.show(
+                                context,
+                                newStatus ? 'Toegevoegd' : 'Verwijderd',
+                              );
+                            }
                           },
                         ),
                       );
-                    }
-
-                    if (!snapshot.hasData) {
-                      return const Padding(
-                        padding: EdgeInsets.only(bottom: 8),
-                        child: VClubTeamRow.loading(),
-                      );
-                    }
-
-                    final loadedTeam = snapshot.data!;
-                    var nextMatchString = "Geen volgende wedstrijd";
-                    String? venue;
-
-                    if (loadedTeam.games.isNotEmpty) {
-                      GameModel nextMatch = loadedTeam.games.first;
-                      venue = nextMatch.venue;
-                      int last = nextMatch.date.length;
-
-                      String date = (last == 10)
-                          ? nextMatch.date.substring(0, (last - 5))
-                          : nextMatch.date;
-
-                      nextMatchString =
-                          "$date $dot ${nextMatch.time} $dot"
-                          "${nextMatch.homeTeam.name} - "
-                          "${nextMatch.awayTeam.name}";
-                    }
-
-                    // Removed debug prints
-
-                    return Padding(
-                      padding: const EdgeInsets.only(bottom: 8),
-                      child: VClubTeamRow(
-                        teamName: loadedTeam.name,
-                        seriesLabel: loadedTeam.leagueName,
-                        nextMatch: nextMatchString,
-                        venue: venue,
-                        isFavorite: loadedTeam.isFavorite,
-                        onTap: () => Navigator.push(
-                          context,
-                          MaterialPageRoute(
-                            builder: (_) => TeamDetailPage(
-                              team: loadedTeam,
-                              preLoadName: loadedTeam.name,
-                            ),
-                          ),
-                        ),
-                        onFavoriteTap: () async {
-                          final newStatus =
-                              await FavoritesService.toggleFavorite(loadedTeam);
-                          setState(() {
-                            loadedTeam.isFavorite = newStatus;
-                          });
-                          if (mounted) {
-                            VToastOverlay.show(
-                              context,
-                              newStatus ? 'Toegevoegd' : 'Verwijderd',
-                            );
-                          }
-                        },
-                      ),
-                    );
-                  },
-                );
-              }),
-            ],
-          );
-        },
+                    },
+                  );
+                }),
+              ],
+            );
+          },
+        ),
       ),
     );
   }
@@ -1860,6 +2166,13 @@ class _TeamDetailPageState extends State<TeamDetailPage> {
         _isFavorite = isFav;
       });
     }
+  }
+
+  Future<void> _handleRefresh() async {
+    setState(() {
+      _teamFuture = widget.team.load(forceReload: true);
+    });
+    await _teamFuture;
   }
 
   Future<void> _downloadAndOpenCalendar(
@@ -2000,113 +2313,338 @@ class _TeamDetailPageState extends State<TeamDetailPage> {
           ),
         ],
       ),
-      body: FutureBuilder<TeamModel>(
-        future: _teamFuture,
-        builder: (context, snapshot) {
-          if (snapshot.connectionState == ConnectionState.waiting) {
-            return Center(
-              child: VEmptyState(
-                icon: Icons.calendar_month_outlined,
-                title: 'Wedstrijden laden',
-                subtitle: 'Even geduld, we halen de wedstrijden op...',
-              ),
-            );
-          }
+      body: RefreshIndicator(
+        onRefresh: _handleRefresh,
+        color: accentYellow,
+        child: FutureBuilder<TeamModel>(
+          future: _teamFuture,
+          builder: (context, snapshot) {
+            if (snapshot.connectionState == ConnectionState.waiting) {
+              return ListView(
+                physics: const AlwaysScrollableScrollPhysics(),
+                children: [
+                  Center(
+                    child: VEmptyState(
+                      icon: Icons.calendar_month_outlined,
+                      title: 'Wedstrijden laden',
+                      subtitle: 'Even geduld, we halen de wedstrijden op...',
+                    ),
+                  ),
+                ],
+              );
+            }
 
-          if (!snapshot.hasData || snapshot.data!.games.isEmpty) {
-            return Center(
-              child: VEmptyState(
-                icon: Icons.calendar_month_outlined,
-                title: 'Geen wedstrijden beschikbaar',
-                subtitle: 'De wedstrijdata worden binnenkort bekendgemaakt.',
-              ),
-            );
-          }
+            if (!snapshot.hasData || snapshot.data!.games.isEmpty) {
+              return ListView(
+                physics: const AlwaysScrollableScrollPhysics(),
+                children: [
+                  Center(
+                    child: VEmptyState(
+                      icon: Icons.calendar_month_outlined,
+                      title: 'Geen wedstrijden beschikbaar',
+                      subtitle:
+                          'De wedstrijdata worden binnenkort bekendgemaakt.',
+                    ),
+                  ),
+                ],
+              );
+            }
 
-          final team = snapshot.data!;
+            final team = snapshot.data!;
 
-          final dagen = ['Zo', 'Ma', 'Di', 'Wo', 'Do', 'Vr', 'Za'];
-          final maanden = [
-            'januari',
-            'februari',
-            'maart',
-            'april',
-            'mei',
-            'juni',
-            'juli',
-            'augustus',
-            'september',
-            'oktober',
-            'november',
-            'december',
-          ];
+            final dagen = ['Zo', 'Ma', 'Di', 'Wo', 'Do', 'Vr', 'Za'];
+            final maanden = [
+              'januari',
+              'februari',
+              'maart',
+              'april',
+              'mei',
+              'juni',
+              'juli',
+              'augustus',
+              'september',
+              'oktober',
+              'november',
+              'december',
+            ];
 
-          final Map<String, Map<String, dynamic>> grouped = {};
+            final Map<String, Map<String, dynamic>> grouped = {};
 
-          for (final m in team.games) {
-            final parts = m.date.split('/');
+            for (final m in team.games) {
+              final parts = m.date.split('/');
 
-            final day = int.parse(parts[0]);
-            final month = int.parse(parts[1]);
-            final year = int.parse(parts[2]);
+              final month = int.parse(parts[1]);
+              final year = int.parse(parts[2]);
 
-            final key = '$month/$year';
-            final label = '${maanden[month - 1]} $year';
+              final key = '$month/$year';
+              final label = '${maanden[month - 1]} $year';
 
-            grouped.putIfAbsent(
-              key,
-              () => {'label': label, 'matches': <GameModel>[]},
-            );
+              grouped.putIfAbsent(
+                key,
+                () => {'label': label, 'matches': <GameModel>[]},
+              );
 
-            (grouped[key]!['matches'] as List<GameModel>).add(m);
-          }
+              (grouped[key]!['matches'] as List<GameModel>).add(m);
+            }
 
-          final sections = grouped.entries.toList();
+            final sections = grouped.entries.toList();
 
-          return ListView(
-            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
-            children: [
-              if (team.calendarUrl != null && team.calendarUrl!.isNotEmpty)
-                _buildCalendarSyncCard(context, team.calendarUrl!, team.name),
-              ...sections.map((section) {
-                final matches = section.value['matches'] as List<GameModel>;
+            return ListView(
+              physics: const AlwaysScrollableScrollPhysics(),
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+              children: [
+                _buildStatsRow(team),
+                if (team.calendarUrl != null && team.calendarUrl!.isNotEmpty)
+                  _buildCalendarSyncCard(context, team.calendarUrl!, team.name),
+                ...sections.map((section) {
+                  final matches = section.value['matches'] as List<GameModel>;
 
-                return Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    VDateDivider(label: section.value['label'] as String),
-                    ...matches.map((m) {
-                      final parts = m.date.split('/');
-                      final day = int.parse(parts[0]);
-                      final month = int.parse(parts[1]);
-                      final year = int.parse(parts[2]);
+                  return Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      VDateDivider(label: section.value['label'] as String),
+                      ...matches.map((m) {
+                        final parts = m.date.split('/');
+                        final day = int.parse(parts[0]);
+                        final month = int.parse(parts[1]);
+                        final year = int.parse(parts[2]);
 
-                      final date = DateTime(year, month, day);
+                        final date = DateTime(year, month, day);
 
-                      return Padding(
-                        padding: const EdgeInsets.only(bottom: 8),
-                        child: VTeamDetailMatchCard(
-                          homeTeam: m.homeTeam.name,
-                          awayTeam: m.awayTeam.name,
-                          result: m.result,
-                          venue: m.venue,
-                          dateDay: dagen[date.weekday % 7],
-                          dateNum: day,
-                          dateMonth: maanden[month - 1].substring(0, 3),
-                          timeString: m.time,
-                          isHomeTeam: m.homeTeam.name.contains(
-                            team.name.split(' ').last,
+                        return Padding(
+                          padding: const EdgeInsets.only(bottom: 8),
+                          child: VTeamDetailMatchCard(
+                            homeTeam: m.homeTeam.name,
+                            awayTeam: m.awayTeam.name,
+                            result: m.result,
+                            venue: m.venue,
+                            dateDay: dagen[date.weekday % 7],
+                            dateNum: day,
+                            dateMonth: maanden[month - 1].substring(0, 3),
+                            timeString: m.time,
+                            isHomeTeam: m.homeTeam.teamId == team.teamId,
+                            favoriteWon: m.didTeamWin(team.teamId),
+                            onTap: m.matchId != null
+                                ? () => _showSetScores(context, m)
+                                : null,
                           ),
+                        );
+                      }),
+                    ],
+                  );
+                }),
+              ],
+            );
+          },
+        ),
+      ),
+    );
+  }
+
+  /// Finds this team's own row in its ranking table. The scraper leaves
+  /// team_id null for that row (the site doesn't link to the team whose
+  /// page you're already on), so it's matched by name instead.
+  Map<String, dynamic>? _selfRankingRow(TeamModel team) {
+    for (final r in team.ranking) {
+      if (r is Map<String, dynamic> && r['team'] == team.name) {
+        return r;
+      }
+    }
+    return null;
+  }
+
+  /// Current consecutive win/loss streak, scanning backward from the most
+  /// recently played match. Null if no played matches are available.
+  ({int count, bool isWin})? _currentStreak(TeamModel team) {
+    int count = 0;
+    bool? isWin;
+    for (final g in team.games.reversed) {
+      final won = g.didTeamWin(team.teamId);
+      if (won == null) continue;
+      if (isWin == null) {
+        isWin = won;
+        count = 1;
+      } else if (won == isWin) {
+        count++;
+      } else {
+        break;
+      }
+    }
+    if (isWin == null) return null;
+    return (count: count, isWin: isWin);
+  }
+
+  Widget _buildStatsRow(TeamModel team) {
+    final row = _selfRankingRow(team);
+    if (row == null) return const SizedBox.shrink();
+
+    final won =
+        ((row['won_3_0_3_1'] as num?) ?? 0).toInt() +
+        ((row['won_3_2'] as num?) ?? 0).toInt();
+    final lost =
+        ((row['lost_3_0_3_1'] as num?) ?? 0).toInt() +
+        ((row['lost_3_2'] as num?) ?? 0).toInt();
+    final setsWon = ((row['sets_won'] as num?) ?? 0).toInt();
+    final setsLost = ((row['sets_lost'] as num?) ?? 0).toInt();
+    final points = ((row['points'] as num?) ?? 0).toInt();
+    final streak = _currentStreak(team);
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 20),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: VStatCard(
+                  value: won,
+                  label: 'Gewonnen',
+                  valueColor: accentGreen,
+                  gradientStart: accentGreen.withValues(alpha: 0.12),
+                  gradientEnd: accentGreen.withValues(alpha: 0.04),
+                  borderColor: accentGreen.withValues(alpha: 0.15),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: VStatCard(
+                  value: lost,
+                  label: 'Verloren',
+                  valueColor: accentRed,
+                  gradientStart: accentRed.withValues(alpha: 0.12),
+                  gradientEnd: accentRed.withValues(alpha: 0.04),
+                  borderColor: accentRed.withValues(alpha: 0.15),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: VStatCard(value: setsWon - setsLost, label: 'Sets +/-'),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: VStatCard(value: points, label: 'Punten'),
+              ),
+            ],
+          ),
+          if (streak != null && streak.count >= 2) ...[
+            const SizedBox(height: 10),
+            Row(
+              children: [
+                Icon(
+                  streak.isWin
+                      ? Icons.trending_up_rounded
+                      : Icons.trending_down_rounded,
+                  size: 14,
+                  color: streak.isWin ? accentGreen : accentRed,
+                ),
+                const SizedBox(width: 4),
+                Text(
+                  '${streak.count}x op rij ${streak.isWin ? "gewonnen" : "verloren"}',
+                  style: VTextStyles.caption,
+                ),
+              ],
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  String _buildShareText(GameModel match, MatchDetailModel? detail) {
+    final buffer = StringBuffer(
+      '${match.homeTeam.name} ${match.result} ${match.awayTeam.name}',
+    );
+    if (detail != null && detail.sets.isNotEmpty) {
+      final sets = detail.sets.map((s) => '${s.home}-${s.away}').join(', ');
+      buffer.write('\n($sets)');
+    }
+    buffer.write('\n\nVolleyStats');
+    return buffer.toString();
+  }
+
+  void _showSetScores(BuildContext context, GameModel match) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: cardBg,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (context) {
+        return Padding(
+          padding: const EdgeInsets.all(20),
+          child: FutureBuilder<MatchDetailModel>(
+            future: MatchDetailModel.load(match.matchCode, match.matchId!),
+            builder: (context, snapshot) {
+              final detail = snapshot.data;
+              return Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Expanded(
+                        child: Text(
+                          '${match.homeTeam.name} - ${match.awayTeam.name}',
+                          style: VTextStyles.h3,
+                        ),
+                      ),
+                      GestureDetector(
+                        onTap: () => SharePlus.instance.share(
+                          ShareParams(text: _buildShareText(match, detail)),
+                        ),
+                        child: const Padding(
+                          padding: EdgeInsets.only(left: 8),
+                          child: Icon(
+                            Icons.share_outlined,
+                            size: 18,
+                            color: accentYellow,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                  Text(match.result, style: VTextStyles.bodySecondary),
+                  const SizedBox(height: 16),
+                  if (snapshot.connectionState == ConnectionState.waiting)
+                    const Center(
+                      child: Padding(
+                        padding: EdgeInsets.symmetric(vertical: 20),
+                        child: CircularProgressIndicator(color: accentYellow),
+                      ),
+                    )
+                  else if (snapshot.hasError || snapshot.data!.sets.isEmpty)
+                    Text(
+                      'Setstanden niet beschikbaar voor deze wedstrijd.',
+                      style: VTextStyles.caption,
+                    )
+                  else
+                    ...snapshot.data!.sets.asMap().entries.map((entry) {
+                      final index = entry.key;
+                      final set = entry.value;
+                      return Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 6),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Text('Set ${index + 1}', style: VTextStyles.body),
+                            Text(
+                              '${set.home} - ${set.away}',
+                              style: VTextStyles.bodyBold,
+                            ),
+                          ],
                         ),
                       );
                     }),
-                  ],
-                );
-              }),
-            ],
-          );
-        },
-      ),
+                  const SizedBox(height: 8),
+                ],
+              );
+            },
+          ),
+        );
+      },
     );
   }
 
@@ -2249,9 +2787,9 @@ class ClubModel {
     };
   }
 
-  Future<ClubModel> load() async {
+  Future<ClubModel> load({bool forceReload = false}) async {
     final key = clubId;
-    if (_clubCache.containsKey(key)) {
+    if (_clubCache.containsKey(key) && !forceReload) {
       return _clubCache[key]!;
     }
 
@@ -2348,15 +2886,19 @@ class TeamModel {
     if (name.isEmpty) name = label;
 
     List<dynamic> ranking = [];
-    String? alert;
+    String? alert = json['alert'] as String?;
 
     final rawRanking = json['ranking'];
     if (rawRanking is List) {
+      // The API normally returns a flat list of ranking rows, with any
+      // alert text as a separate top-level "alert" field. Older/transitional
+      // responses may still wrap it as [rows, alertOrNull] - handle both,
+      // and don't require index 1 to be a String (it's usually null).
       if (rawRanking.length == 2 &&
           rawRanking[0] is List &&
-          rawRanking[1] is String) {
+          (rawRanking[1] == null || rawRanking[1] is String)) {
         ranking = rawRanking[0];
-        alert = rawRanking[1];
+        alert ??= rawRanking[1] as String?;
       } else {
         ranking = rawRanking;
       }
@@ -2490,6 +3032,7 @@ void _persistTeamsThrottled() {
 
 class GameModel {
   final String matchCode;
+  final String? matchId;
   final String day;
   final String date;
   final String time;
@@ -2500,6 +3043,7 @@ class GameModel {
 
   const GameModel({
     required this.matchCode,
+    this.matchId,
     required this.day,
     required this.date,
     required this.time,
@@ -2521,6 +3065,7 @@ class GameModel {
 
     return GameModel(
       matchCode: code,
+      matchId: json["match_id"]?.toString(),
       day: json["day"]?.toString() ?? '',
       date: json["date"]?.toString() ?? '',
       time: json["time"]?.toString() ?? '',
@@ -2546,6 +3091,7 @@ class GameModel {
   Map<String, dynamic> toJson() {
     return {
       'match_code': matchCode,
+      'match_id': matchId,
       'day': day,
       'date': date,
       'time': time,
@@ -2555,103 +3101,71 @@ class GameModel {
       'result': result,
     };
   }
-}
 
-class LeagueModel {
-  final String series;
-  final String seriesId;
-  final List<dynamic> ranking;
-  final String? alert;
+  /// Returns true if [teamId] won this match, false if it lost, or null if
+  /// the match hasn't been played yet, the result couldn't be parsed, or
+  /// [teamId] didn't play in this match.
+  bool? didTeamWin(String teamId) {
+    if (result.isEmpty) return null;
+    if (teamId != homeTeam.teamId && teamId != awayTeam.teamId) return null;
 
-  LeagueModel({
-    required this.series,
-    required this.seriesId,
-    required this.ranking,
-    this.alert,
-  });
+    final parts = result.split('-').map((p) => p.trim()).toList();
+    if (parts.length != 2) return null;
 
-  factory LeagueModel.fromJson(Map<String, dynamic> json) {
-    List<dynamic> ranking = [];
-    String? alert = json['alert'] as String?;
-
-    final rawRanking = json['ranking'];
-    if (rawRanking is List) {
-      if (rawRanking.length == 2 &&
-          rawRanking[0] is List &&
-          rawRanking[1] is String) {
-        ranking = rawRanking[0];
-        alert ??= rawRanking[1];
-      } else {
-        ranking = rawRanking;
-      }
+    final homeSets = int.tryParse(parts[0]);
+    final awaySets = int.tryParse(parts[1]);
+    if (homeSets == null || awaySets == null || homeSets == awaySets) {
+      return null;
     }
 
-    return LeagueModel(
-      series: json['series'] ?? '',
-      seriesId: json['series_id']?.toString() ?? '',
-      ranking: ranking,
-      alert: alert,
+    final homeWon = homeSets > awaySets;
+    return teamId == homeTeam.teamId ? homeWon : !homeWon;
+  }
+}
+
+/// Per-set scores for a single match, fetched lazily (on demand, not
+/// bundled with team/club loads) via the API's /api/get/match route.
+class MatchDetailModel {
+  final String matchCode;
+  final String? result;
+  final List<({int home, int away})> sets;
+
+  const MatchDetailModel({
+    required this.matchCode,
+    this.result,
+    this.sets = const [],
+  });
+
+  factory MatchDetailModel.fromJson(Map<String, dynamic> json) {
+    final rawSets = json['sets'] as List<dynamic>? ?? [];
+    return MatchDetailModel(
+      matchCode: json['match_code']?.toString() ?? '',
+      result: json['result']?.toString(),
+      sets: rawSets
+          .whereType<Map<String, dynamic>>()
+          .map(
+            (s) => (
+              home: (s['home'] as num?)?.toInt() ?? 0,
+              away: (s['away'] as num?)?.toInt() ?? 0,
+            ),
+          )
+          .toList(),
     );
   }
 
-  Map<String, dynamic> toJson() {
-    return {
-      'series': series,
-      'series_id': seriesId,
-      'ranking': alert != null ? [ranking, alert] : ranking,
-      'alert': alert,
-    };
-  }
+  static Future<MatchDetailModel> load(String matchCode, String matchId) async {
+    final uri = Uri.parse(
+      '${apiBaseUrl}api/get/match'
+      '?match_code=${Uri.encodeComponent(matchCode)}&match_id=$matchId',
+    );
+    final response = await http.get(uri).timeout(const Duration(seconds: 10));
 
-  static Future<LeagueModel> load(
-    String label, {
-    bool forceReload = false,
-  }) async {
-    final key = label;
-
-    if (_leagueCache.containsKey(key) && !forceReload) {
-      return _leagueCache[key]!;
+    if (response.statusCode != 200) {
+      throw Exception('API Error: ${response.statusCode} - ${response.body}');
     }
 
-    final encodedLabel = Uri.encodeComponent(label);
-    final url = '${apiBaseUrl}api/get/league?label=$encodedLabel&season=2026';
-    final uri = Uri.parse(url);
-
-    try {
-      final response = await http.get(uri).timeout(const Duration(seconds: 10));
-
-      if (response.statusCode != 200) {
-        throw Exception('API Error: ${response.statusCode}');
-      }
-
-      final data = jsonDecode(response.body);
-      final league = LeagueModel.fromJson(data);
-
-      _leagueCache[key] = league;
-      // Throttled persist
-      _persistLeaguesThrottled();
-      return league;
-    } catch (e) {
-      debugPrint('LeagueModel.load failed for $label: $e');
-      if (_leagueCache.containsKey(key)) {
-        return _leagueCache[key]!;
-      }
-      rethrow;
-    }
+    return MatchDetailModel.fromJson(jsonDecode(response.body));
   }
-}
-
-Timer? _leaguesPersistTimer;
-void _persistLeaguesThrottled() {
-  _leaguesPersistTimer?.cancel();
-  _leaguesPersistTimer = Timer(const Duration(seconds: 5), () async {
-    final Map<String, dynamic> jsonMap = {};
-    _leagueCache.forEach((key, value) {
-      jsonMap[key] = value.toJson();
-    });
-    await PersistenceService.saveLeagues(jsonMap);
-    debugPrint('Leagues persisted to disk');
-  });
 }
 
 class VLoadingPage extends StatelessWidget {
