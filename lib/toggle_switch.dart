@@ -9,38 +9,47 @@ class VToggleSwitch extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: () => onChanged?.call(!isOn),
-      child: Container(
-        width: 44,
-        height: 24,
-        decoration: BoxDecoration(
-          color: isOn ? accentYellow : secondary,
-          borderRadius: BorderRadius.circular(12),
-        ),
-        child: AnimatedAlign(
-          duration: const Duration(milliseconds: 200),
-          alignment: isOn ? Alignment.centerRight : Alignment.centerLeft,
-          child: Padding(
-            padding: const EdgeInsets.all(2),
-            child: Container(
-              width: 20,
-              height: 20,
-              decoration: BoxDecoration(
-                color: light,
-                shape: BoxShape.circle,
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.3),
-                    blurRadius: 3,
-                    offset: const Offset(0, 1),
-                  ),
-                ],
-              ),
+    final track = Container(
+      width: 44,
+      height: 24,
+      decoration: BoxDecoration(
+        color: isOn ? accentYellow : secondary,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: AnimatedAlign(
+        duration: const Duration(milliseconds: 200),
+        alignment: isOn ? Alignment.centerRight : Alignment.centerLeft,
+        child: Padding(
+          padding: const EdgeInsets.all(2),
+          child: Container(
+            width: 20,
+            height: 20,
+            decoration: BoxDecoration(
+              color: light,
+              shape: BoxShape.circle,
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: 0.3),
+                  blurRadius: 3,
+                  offset: const Offset(0, 1),
+                ),
+              ],
             ),
           ),
         ),
       ),
     );
+
+    // Every current call site relies on a parent row's own GestureDetector
+    // to toggle this (none pass onChanged) - so this must NOT install its
+    // own GestureDetector in that case. A nested one would still win the
+    // gesture arena for taps landing on the switch itself even doing
+    // nothing (onChanged null), silently swallowing exactly the tap a user
+    // would most naturally make - the switch would visually exist but be
+    // unresponsive right where it matters most, while the rest of the row
+    // kept working.
+    if (onChanged == null) return track;
+
+    return GestureDetector(onTap: () => onChanged!(!isOn), child: track);
   }
 }
