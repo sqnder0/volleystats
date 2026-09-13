@@ -126,4 +126,141 @@ void main() {
       expect(date_utils.formatDateFull('12/09/2026'), 'Za 12 sep');
     });
   });
+
+  group('date_utils.combineDateAndTime', () {
+    test('combines a date-only DateTime with an HH:MM time', () {
+      final combined = date_utils.combineDateAndTime(
+        DateTime(2026, 9, 12),
+        '20:30',
+      );
+      expect(combined, DateTime(2026, 9, 12, 20, 30));
+    });
+
+    test('returns null for a malformed time', () {
+      expect(date_utils.combineDateAndTime(DateTime(2026, 9, 12), '20'), null);
+      expect(
+        date_utils.combineDateAndTime(DateTime(2026, 9, 12), 'nope'),
+        null,
+      );
+    });
+  });
+
+  group('ClubMatchSummary.didTeamWin', () {
+    test('returns true when the home team wins', () {
+      final m = ClubMatchSummary(
+        date: '12/09/2026',
+        time: '20:00',
+        homeTeam: 'Us',
+        awayTeam: 'Them',
+        result: '3 - 1',
+      );
+      expect(m.didTeamWin('Us'), true);
+      expect(m.didTeamWin('Them'), false);
+    });
+
+    test('returns true when the away team wins', () {
+      final m = ClubMatchSummary(
+        date: '12/09/2026',
+        time: '20:00',
+        homeTeam: 'Them',
+        awayTeam: 'Us',
+        result: '0 - 3',
+      );
+      expect(m.didTeamWin('Us'), true);
+    });
+
+    test('returns null when unplayed', () {
+      final m = ClubMatchSummary(
+        date: '12/09/2026',
+        time: '20:00',
+        homeTeam: 'Us',
+        awayTeam: 'Them',
+        result: '',
+      );
+      expect(m.didTeamWin('Us'), null);
+    });
+
+    test('returns null for a team name not in this match', () {
+      final m = ClubMatchSummary(
+        date: '12/09/2026',
+        time: '20:00',
+        homeTeam: 'Us',
+        awayTeam: 'Them',
+        result: '3 - 1',
+      );
+      expect(m.didTeamWin('Someone Else'), null);
+    });
+
+    test('tolerates surrounding whitespace in the team name', () {
+      final m = ClubMatchSummary(
+        date: '12/09/2026',
+        time: '20:00',
+        homeTeam: 'Us',
+        awayTeam: 'Them',
+        result: '3 - 1',
+      );
+      expect(m.didTeamWin(' Us '), true);
+    });
+  });
+
+  group('ClubModel.fromJson team parsing', () {
+    test('populates name, leagueName, and match summaries from club JSON', () {
+      final club = ClubModel.fromJson({
+        'name': 'Mendo Booischot',
+        'club_id': '10911',
+        'label': 'AH-1260 Mendo Booischot',
+        'competition_teams': [
+          {
+            'series': 'Nationale 1 Heren (NAT1H)',
+            'team': 'Mendo Booischot A',
+            'id': 101645,
+            'next_match': {
+              'date': '20/09/2026',
+              'time': '17:00',
+              'home_team': 'Volley Noorderkempen A',
+              'away_team': 'Mendo Booischot A',
+              'result': '',
+            },
+            'previous_match': {
+              'date': '12/09/2026',
+              'time': '20:00',
+              'home_team': 'VC Packo Zedelgem A',
+              'away_team': 'Mendo Booischot A',
+              'result': '0 - 3',
+            },
+          },
+        ],
+      });
+
+      final team = club.compTeams.single;
+      expect(team.name, 'Mendo Booischot A');
+      expect(team.leagueName, 'Nationale 1 Heren');
+      expect(team.teamId, '101645');
+      expect(team.clubNextMatch?.homeTeam, 'Volley Noorderkempen A');
+      expect(team.clubPreviousMatch?.result, '0 - 3');
+    });
+
+    test('a team with no previous match keeps it null', () {
+      final club = ClubModel.fromJson({
+        'competition_teams': [
+          {
+            'series': 'Heren Promo 2 (AHP2)',
+            'team': 'Mendo Booischot D',
+            'id': 101652,
+            'next_match': {
+              'date': '13/09/2026',
+              'time': '18:00',
+              'home_team': 'Mortsel Volley Antwerpen B',
+              'away_team': 'Mendo Booischot D',
+              'result': '',
+            },
+            'previous_match': null,
+          },
+        ],
+      });
+
+      expect(club.compTeams.single.clubPreviousMatch, null);
+      expect(club.compTeams.single.clubNextMatch, isNotNull);
+    });
+  });
 }

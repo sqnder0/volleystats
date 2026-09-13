@@ -11,6 +11,8 @@ class FavoritesService {
   static const String _keyNotificationMinute = 'notification_minute';
   static const String _keyResultNotificationsEnabled =
       'result_notifications_enabled';
+  static const String _keyMatchReminderNotificationsEnabled =
+      'match_reminder_notifications_enabled';
 
   static final ValueNotifier<int> favoritesNotifier = ValueNotifier<int>(0);
 
@@ -53,6 +55,20 @@ class FavoritesService {
     await prefs.setBool(_keyResultNotificationsEnabled, enabled);
   }
 
+  /// Independent of the other two notification toggles - controls whether
+  /// a reminder fires shortly before a followed team's match starts.
+  static Future<bool> areMatchReminderNotificationsEnabled() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getBool(_keyMatchReminderNotificationsEnabled) ?? false;
+  }
+
+  static Future<void> setMatchReminderNotificationsEnabled(
+    bool enabled,
+  ) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_keyMatchReminderNotificationsEnabled, enabled);
+  }
+
   /// Preload all favorite teams into the global cache
   static Future<void> preloadFavorites() async {
     final favorites = await loadFavorites();
@@ -68,6 +84,12 @@ class FavoritesService {
             allMatches.add({
               'time': game.date, // DD/MM/YYYY
               'fav_name': fullTeam.name,
+              'match_code': game.matchCode,
+              'match_time': game.time,
+              'home_team': game.homeTeam.name,
+              'away_team': game.awayTeam.name,
+              'result': game.result,
+              'date_obj': _parseDate(game.date),
             });
           }
         }
@@ -81,6 +103,28 @@ class FavoritesService {
     if (enabled) {
       final time = await getNotificationTime();
       await NotificationService.scheduleDailySummaries(allMatches, time);
+    } else {
+      await NotificationService.cancelDailySummaries();
+    }
+
+    final remindersEnabled = await areMatchReminderNotificationsEnabled();
+    if (remindersEnabled) {
+      await NotificationService.scheduleMatchReminders(allMatches);
+    } else {
+      await NotificationService.cancelMatchReminders();
+    }
+  }
+
+  static DateTime? _parseDate(String dateStr) {
+    try {
+      final parts = dateStr.split('/');
+      return DateTime(
+        int.parse(parts[2]),
+        int.parse(parts[1]),
+        int.parse(parts[0]),
+      );
+    } catch (e) {
+      return null;
     }
   }
 

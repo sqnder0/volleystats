@@ -283,6 +283,7 @@ class HomePage extends StatefulWidget {
 
 class _HomePageState extends State<HomePage> {
   String _filter = 'all';
+  String? _teamFilter;
   late Future<List<Map<String, dynamic>>> _homeMatchesFuture;
   List<String> _failedFavoriteNames = [];
 
@@ -405,6 +406,29 @@ class _HomePageState extends State<HomePage> {
     return matches;
   }
 
+  List<Map<String, dynamic>> _applyTeamFilter(
+    List<Map<String, dynamic>> matches,
+  ) {
+    if (_teamFilter == null) return matches;
+    return matches
+        .where((m) => (m['team_model'] as TeamModel).teamId == _teamFilter)
+        .toList();
+  }
+
+  /// Distinct favorite teams present in [matches], in first-seen order -
+  /// used for the team-filter chip row. Derived from the full match list
+  /// (not the time/team-filtered one) so the chips available don't shift
+  /// around as the user changes filters.
+  List<TeamModel> _favoriteTeamOptions(List<Map<String, dynamic>> matches) {
+    final seen = <String>{};
+    final options = <TeamModel>[];
+    for (final m in matches) {
+      final team = m['team_model'] as TeamModel;
+      if (seen.add(team.teamId)) options.add(team);
+    }
+    return options;
+  }
+
   @override
   Widget build(BuildContext context) {
     return RefreshIndicator(
@@ -516,24 +540,66 @@ class _HomePageState extends State<HomePage> {
                 );
               }
 
-              final filtered = _applyFilter(matches);
-              if (filtered.isEmpty) {
-                return const SliverToBoxAdapter(
-                  child: VEmptyState(
-                    icon: Icons.event_busy_outlined,
-                    title: 'Geen wedstrijden',
-                    subtitle: 'Geen wedstrijden gevonden voor deze periode.',
-                  ),
-                );
-              }
+              // Derived from the full match list, not the filtered one, so
+              // the chips on offer don't shift around as filters change.
+              final teamOptions = _favoriteTeamOptions(matches);
+              final filtered = _applyTeamFilter(_applyFilter(matches));
 
-              return SliverPadding(
-                padding: const EdgeInsets.symmetric(horizontal: 20),
-                sliver: _buildSliverMatchList(filtered),
+              final resultsSliver = filtered.isEmpty
+                  ? const SliverToBoxAdapter(
+                      child: VEmptyState(
+                        icon: Icons.event_busy_outlined,
+                        title: 'Geen wedstrijden',
+                        subtitle:
+                            'Geen wedstrijden gevonden voor deze periode.',
+                      ),
+                    )
+                  : SliverPadding(
+                      padding: const EdgeInsets.symmetric(horizontal: 20),
+                      sliver: _buildSliverMatchList(filtered),
+                    );
+
+              // Only worth showing once there's more than one favorite team
+              // to actually choose between.
+              if (teamOptions.length <= 1) return resultsSliver;
+
+              return SliverMainAxisGroup(
+                slivers: [
+                  SliverPadding(
+                    padding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
+                    sliver: SliverToBoxAdapter(
+                      child: _buildTeamFilterRow(teamOptions),
+                    ),
+                  ),
+                  resultsSliver,
+                ],
               );
             },
           ),
           const SliverToBoxAdapter(child: SizedBox(height: 24)),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildTeamFilterRow(List<TeamModel> options) {
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      child: Row(
+        children: [
+          VFilterTab(
+            label: 'Alle teams',
+            isActive: _teamFilter == null,
+            onTap: () => setState(() => _teamFilter = null),
+          ),
+          for (final team in options) ...[
+            const SizedBox(width: 8),
+            VFilterTab(
+              label: team.name,
+              isActive: _teamFilter == team.teamId,
+              onTap: () => setState(() => _teamFilter = team.teamId),
+            ),
+          ],
         ],
       ),
     );
@@ -1487,6 +1553,7 @@ class MorePage extends StatefulWidget {
 class _MorePageState extends State<MorePage> {
   bool _notificationsEnabled = false;
   bool _resultNotificationsEnabled = false;
+  bool _matchReminderNotificationsEnabled = false;
   TimeOfDay _notificationTime = const TimeOfDay(hour: 8, minute: 0);
 
   @override
@@ -1499,11 +1566,14 @@ class _MorePageState extends State<MorePage> {
     final enabled = await FavoritesService.areNotificationsEnabled();
     final resultEnabled =
         await FavoritesService.areResultNotificationsEnabled();
+    final reminderEnabled =
+        await FavoritesService.areMatchReminderNotificationsEnabled();
     final time = await FavoritesService.getNotificationTime();
     if (mounted) {
       setState(() {
         _notificationsEnabled = enabled;
         _resultNotificationsEnabled = resultEnabled;
+        _matchReminderNotificationsEnabled = reminderEnabled;
         _notificationTime = time;
       });
     }
@@ -1516,7 +1586,7 @@ class _MorePageState extends State<MorePage> {
       // Trigger a re-load to schedule notifications
       FavoritesService.preloadFavorites();
     } else {
-      await NotificationService.cancelAll();
+      await NotificationService.cancelDailySummaries();
     }
   }
 
@@ -1527,6 +1597,17 @@ class _MorePageState extends State<MorePage> {
       // Seed/refresh the baseline immediately rather than waiting for the
       // next periodic check or app resume.
       ResultsWatcherService.checkForNewResults();
+    }
+  }
+
+  Future<void> _toggleMatchReminderNotifications(bool value) async {
+    await FavoritesService.setMatchReminderNotificationsEnabled(value);
+    setState(() => _matchReminderNotificationsEnabled = value);
+    if (value) {
+      // Trigger a re-load to schedule reminders for the upcoming matches
+      FavoritesService.preloadFavorites();
+    } else {
+      await NotificationService.cancelMatchReminders();
     }
   }
 
@@ -1604,6 +1685,19 @@ class _MorePageState extends State<MorePage> {
               : 'Melding bij een nieuwe uitslag van je favoriete teams',
           trailing: VToggleSwitch(isOn: _resultNotificationsEnabled),
           onTap: () => _toggleResultNotifications(!_resultNotificationsEnabled),
+        ),
+        VSettingsRow(
+          icon: Icons.notifications_active_outlined,
+          iconBgColor: blueInfo.withValues(alpha: 0.12),
+          iconColor: blueInfo,
+          title: 'Wedstrijd herinneringen',
+          subtitle: Platform.isIOS
+              ? 'Herinnering voor een wedstrijd start (niet gegarandeerd als de app gesloten is)'
+              : 'Herinnering 2 uur voor een wedstrijd van je favoriete teams',
+          trailing: VToggleSwitch(isOn: _matchReminderNotificationsEnabled),
+          onTap: () => _toggleMatchReminderNotifications(
+            !_matchReminderNotificationsEnabled,
+          ),
         ),
         VSettingsRow(
           icon: Icons.dark_mode_outlined,
@@ -1741,12 +1835,11 @@ class _ClubDetailPageState extends State<ClubDetailPage> {
   bool _isCompetitionTab = true;
   bool _isFavorite = false;
   late Future<ClubModel> _clubFuture;
-  final Map<String, TeamModel> _loadedTeams = {};
 
   @override
   void initState() {
     super.initState();
-    _clubFuture = widget.club.load();
+    _clubFuture = _loadClub();
     _checkFavorite();
   }
 
@@ -1755,32 +1848,24 @@ class _ClubDetailPageState extends State<ClubDetailPage> {
     if (mounted) setState(() => _isFavorite = isFav);
   }
 
-  Future<void> _handleRefresh() async {
-    final freshClub = await widget.club.load(forceReload: true);
+  // The club overview page already carries each team's next/previous
+  // match (see ClubMatchSummary), so unlike before, there's no per-team
+  // fetch here to race against - just the one club load, plus flagging
+  // which of its teams are favorited (a local, synchronous-fast lookup).
+  Future<ClubModel> _loadClub({bool forceReload = false}) async {
+    final club = await widget.club.load(forceReload: forceReload);
 
-    // Reload every visible team's row data up front and populate the cache
-    // directly, rather than flipping a "force reload" flag that the team
-    // FutureBuilders read at build time - by the time this function's
-    // `await` above resumes and could reset such a flag, the outer
-    // FutureBuilder here has *already* rebuilt (its own internal listener
-    // on the same future runs after this one, since it only subscribes on
-    // the next frame - after this continuation, not before), so a
-    // flag-based approach silently reads back `false` and never actually
-    // re-fetches team data.
-    final allTeams = [...freshClub.compTeams, ...freshClub.cupTeams];
-    await Future.wait(
-      allTeams.map((team) async {
-        try {
-          final loaded = await team.load(forceReload: true);
-          loaded.isFavorite = await FavoritesService.isFavorite(
-            loaded.teamId,
-          );
-          _loadedTeams[loaded.teamId] = loaded;
-        } catch (e) {
-          log('ClubDetailPage', 'Refresh failed for team ${team.teamId}', error: e);
-        }
-      }),
-    );
+    final favorites = await FavoritesService.loadFavorites();
+    final favoriteIds = favorites.map((f) => f.teamId).toSet();
+    for (final team in [...club.compTeams, ...club.cupTeams]) {
+      team.isFavorite = favoriteIds.contains(team.teamId);
+    }
+
+    return club;
+  }
+
+  Future<void> _handleRefresh() async {
+    final freshClub = await _loadClub(forceReload: true);
 
     if (mounted) {
       setState(() {
@@ -1889,7 +1974,7 @@ class _ClubDetailPageState extends State<ClubDetailPage> {
                   actionLabel: 'Opnieuw proberen',
                   onActionTap: () {
                     setState(() {
-                      _clubFuture = widget.club.load();
+                      _clubFuture = _loadClub();
                     });
                   },
                 ),
@@ -1958,125 +2043,64 @@ class _ClubDetailPageState extends State<ClubDetailPage> {
                 const SizedBox(height: 16),
 
                 // LIST
+                // Rendered directly from the club's own data (see
+                // ClubMatchSummary) - no per-team fetch needed just to show
+                // a row; TeamModel.load() only happens on tap, once the
+                // user actually wants that team's full detail page.
                 ...teamsToShow.map((team) {
-                  final cachedTeam = _loadedTeams[team.teamId];
+                  final upcoming = team.clubNextMatch;
+                  final previous = team.clubPreviousMatch;
 
-                  return FutureBuilder<TeamModel>(
-                    key: ValueKey('${_isCompetitionTab}_${team.teamId}'),
-                    future: cachedTeam != null
-                        ? Future.value(cachedTeam)
-                        : team.load().then((loaded) async {
-                            loaded.isFavorite =
-                                await FavoritesService.isFavorite(
-                                  loaded.teamId,
-                                );
-                            _loadedTeams[loaded.teamId] = loaded;
-                            return loaded;
-                          }),
-                    builder: (context, snapshot) {
-                      if (snapshot.hasError) {
-                        log(
-                          'ClubDetailPage',
-                          'Error loading team ${team.teamId}',
-                          error: snapshot.error,
-                        );
-                        return Padding(
-                          padding: const EdgeInsets.only(bottom: 8),
-                          child: VClubTeamRow(
-                            teamName: 'Fout bij laden',
-                            seriesLabel: team.label,
-                            onTap: () {
-                              setState(() {
-                                _loadedTeams.remove(team.teamId);
-                              });
-                            },
-                          ),
-                        );
-                      }
+                  var nextMatchString = "Geen volgende wedstrijd";
+                  if (upcoming != null) {
+                    final date = upcoming.date.length == 10
+                        ? upcoming.date.substring(0, 5)
+                        : upcoming.date;
+                    nextMatchString =
+                        "$date $dot ${upcoming.time} $dot"
+                        "${upcoming.homeTeam} - ${upcoming.awayTeam}";
+                  }
 
-                      if (!snapshot.hasData) {
-                        return const Padding(
-                          padding: EdgeInsets.only(bottom: 8),
-                          child: VClubTeamRow.loading(),
-                        );
-                      }
+                  String? lastResultString;
+                  bool? lastResultWon;
+                  if (previous != null) {
+                    lastResultWon = previous.didTeamWin(team.name);
+                    lastResultString =
+                        "${previous.homeTeam} ${previous.result} "
+                        "${previous.awayTeam}";
+                  }
 
-                      final loadedTeam = snapshot.data!;
-                      var nextMatchString = "Geen volgende wedstrijd";
-                      String? venue;
-                      String? lastResultString;
-                      bool? lastResultWon;
-
-                      // The schedule table lists every match of the season in
-                      // order, so games.first is only "next" before the
-                      // season starts - filter to unplayed matches instead of
-                      // blindly taking the first one.
-                      final upcoming = loadedTeam.games
-                          .where((g) => g.result.isEmpty)
-                          .toList();
-                      if (upcoming.isNotEmpty) {
-                        final nextMatch = upcoming.first;
-                        venue = nextMatch.venue;
-                        int last = nextMatch.date.length;
-
-                        String date = (last == 10)
-                            ? nextMatch.date.substring(0, (last - 5))
-                            : nextMatch.date;
-
-                        nextMatchString =
-                            "$date $dot ${nextMatch.time} $dot"
-                            "${nextMatch.homeTeam.name} - "
-                            "${nextMatch.awayTeam.name}";
-                      }
-
-                      final played = loadedTeam.games
-                          .where((g) => g.result.isNotEmpty)
-                          .toList();
-                      if (played.isNotEmpty) {
-                        final lastMatch = played.last;
-                        lastResultWon = lastMatch.didTeamWin(loadedTeam.teamId);
-                        lastResultString =
-                            "${lastMatch.homeTeam.name} ${lastMatch.result} "
-                            "${lastMatch.awayTeam.name}";
-                      }
-
-                      return Padding(
-                        padding: const EdgeInsets.only(bottom: 8),
-                        child: VClubTeamRow(
-                          teamName: loadedTeam.name,
-                          seriesLabel: loadedTeam.leagueName,
-                          nextMatch: nextMatchString,
-                          venue: venue,
-                          lastResult: lastResultString,
-                          lastResultWon: lastResultWon,
-                          isFavorite: loadedTeam.isFavorite,
-                          onTap: () => Navigator.push(
-                            context,
-                            MaterialPageRoute(
-                              builder: (_) => TeamDetailPage(
-                                team: loadedTeam,
-                                preLoadName: loadedTeam.name,
-                              ),
-                            ),
-                          ),
-                          onFavoriteTap: () async {
-                            final newStatus =
-                                await FavoritesService.toggleFavorite(
-                                  loadedTeam,
-                                );
-                            setState(() {
-                              loadedTeam.isFavorite = newStatus;
-                            });
-                            if (mounted) {
-                              VToastOverlay.show(
-                                context,
-                                newStatus ? 'Toegevoegd' : 'Verwijderd',
-                              );
-                            }
-                          },
+                  return Padding(
+                    padding: const EdgeInsets.only(bottom: 8),
+                    child: VClubTeamRow(
+                      teamName: team.name,
+                      seriesLabel: team.leagueName,
+                      nextMatch: nextMatchString,
+                      lastResult: lastResultString,
+                      lastResultWon: lastResultWon,
+                      isFavorite: team.isFavorite,
+                      onTap: () => Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) =>
+                              TeamDetailPage(team: team, preLoadName: team.name),
                         ),
-                      );
-                    },
+                      ),
+                      onFavoriteTap: () async {
+                        final newStatus = await FavoritesService.toggleFavorite(
+                          team,
+                        );
+                        setState(() {
+                          team.isFavorite = newStatus;
+                        });
+                        if (mounted) {
+                          VToastOverlay.show(
+                            context,
+                            newStatus ? 'Toegevoegd' : 'Verwijderd',
+                          );
+                        }
+                      },
+                    ),
                   );
                 }),
               ],
@@ -2627,6 +2651,40 @@ class _TeamDetailPageState extends State<TeamDetailPage> {
 // ============================================================
 // STATISCHE DATA MODELLEN
 // ============================================================
+
+/// Builds a club-list-row TeamModel directly from one entry of
+/// get_club()'s competition_teams/cup_teams - shared by ClubModel.fromJson
+/// for both lists, which were otherwise identical blocks.
+TeamModel _teamFromClubJson(Map<String, dynamic> m) {
+  final String series = m["series"]?.toString() ?? '';
+  String leagueCode = '';
+  String leagueName = series;
+  if (series.isNotEmpty) {
+    final parts = series.split(" ");
+    if (parts.isNotEmpty) leagueCode = parts.last;
+    leagueName = series.replaceAll(RegExp(r'\s*\([^)]*\)\s*$'), '').trim();
+  }
+
+  final teamName = m['team']?.toString() ?? '';
+  final teamLabel = "$teamName ($leagueCode)";
+  final teamId = (m["id"] ?? m["team_id"] ?? m["teamid"])?.toString() ?? '';
+
+  return TeamModel(
+    label: teamLabel,
+    teamId: teamId,
+    name: teamName,
+    leagueName: leagueName,
+    clubNextMatch: m['next_match'] is Map<String, dynamic>
+        ? ClubMatchSummary.fromJson(m['next_match'] as Map<String, dynamic>)
+        : null,
+    clubPreviousMatch: m['previous_match'] is Map<String, dynamic>
+        ? ClubMatchSummary.fromJson(
+            m['previous_match'] as Map<String, dynamic>,
+          )
+        : null,
+  );
+}
+
 class ClubModel {
   final String name;
   final String code;
@@ -2665,33 +2723,15 @@ class ClubModel {
       website: general['Website']?.toString() ?? '',
 
       compTeams:
-          (json['competition_teams'] as List?)?.map((m) {
-            final String series = m["series"]?.toString() ?? '';
-            String leagueCode = '';
-            if (series.isNotEmpty) {
-              final parts = series.split(" ");
-              if (parts.isNotEmpty) leagueCode = parts.last;
-            }
-            String teamLabel = "${m['team'] ?? ''} ($leagueCode)";
-            final teamId =
-                (m["id"] ?? m["team_id"] ?? m["teamid"])?.toString() ?? '';
-            return TeamModel(label: teamLabel, teamId: teamId);
-          }).toList() ??
+          (json['competition_teams'] as List?)
+              ?.map((m) => _teamFromClubJson(m))
+              .toList() ??
           [],
 
       cupTeams:
-          (json['cup_teams'] as List?)?.map((m) {
-            final String series = m["series"]?.toString() ?? '';
-            String leagueCode = '';
-            if (series.isNotEmpty) {
-              final parts = series.split(" ");
-              if (parts.isNotEmpty) leagueCode = parts.last;
-            }
-            String teamLabel = "${m['team'] ?? ''} ($leagueCode)";
-            final teamId =
-                (m["id"] ?? m["team_id"] ?? m["teamid"])?.toString() ?? '';
-            return TeamModel(label: teamLabel, teamId: teamId);
-          }).toList() ??
+          (json['cup_teams'] as List?)
+              ?.map((m) => _teamFromClubJson(m))
+              .toList() ??
           [],
     );
   }
@@ -2745,6 +2785,58 @@ class ClubModel {
   }
 }
 
+/// A team's next/previous match as summarized on its club's overview page -
+/// lighter than [GameModel] since that page only ever gives team names, no
+/// ids, venue, or match code.
+class ClubMatchSummary {
+  final String date;
+  final String time;
+  final String homeTeam;
+  final String awayTeam;
+  final String result;
+
+  const ClubMatchSummary({
+    required this.date,
+    required this.time,
+    required this.homeTeam,
+    required this.awayTeam,
+    required this.result,
+  });
+
+  factory ClubMatchSummary.fromJson(Map<String, dynamic> json) {
+    return ClubMatchSummary(
+      date: json['date']?.toString() ?? '',
+      time: json['time']?.toString() ?? '',
+      homeTeam: json['home_team']?.toString() ?? '',
+      awayTeam: json['away_team']?.toString() ?? '',
+      result: json['result']?.toString() ?? '',
+    );
+  }
+
+  /// Mirrors GameModel.didTeamWin, but by name - this summary comes from
+  /// the club overview page, which doesn't carry team ids.
+  bool? didTeamWin(String teamName) {
+    if (result.isEmpty) return null;
+
+    final home = homeTeam.trim();
+    final away = awayTeam.trim();
+    final team = teamName.trim();
+    if (team != home && team != away) return null;
+
+    final parts = result.split('-').map((p) => p.trim()).toList();
+    if (parts.length != 2) return null;
+
+    final homeSets = int.tryParse(parts[0]);
+    final awaySets = int.tryParse(parts[1]);
+    if (homeSets == null || awaySets == null || homeSets == awaySets) {
+      return null;
+    }
+
+    final homeWon = homeSets > awaySets;
+    return team == home ? homeWon : !homeWon;
+  }
+}
+
 class TeamModel {
   final String label;
   final String name;
@@ -2758,6 +2850,15 @@ class TeamModel {
   final bool isLoaded;
   bool isFavorite;
 
+  // Only populated when this TeamModel comes from a club's team list
+  // (ClubModel.fromJson) - the club overview page already carries each
+  // team's next/previous match, so the club's row list can render
+  // immediately from it instead of doing a full per-team fetch just to
+  // show one line. A full .load() (e.g. on tapping into TeamDetailPage)
+  // doesn't touch these; the real games list is the source of truth then.
+  final ClubMatchSummary? clubNextMatch;
+  final ClubMatchSummary? clubPreviousMatch;
+
   TeamModel({
     required this.label,
     required this.teamId,
@@ -2770,6 +2871,8 @@ class TeamModel {
     this.calendarUrl,
     this.isLoaded = false,
     this.isFavorite = false,
+    this.clubNextMatch,
+    this.clubPreviousMatch,
   });
 
   factory TeamModel.fromJson(

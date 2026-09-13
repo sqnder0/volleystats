@@ -6,6 +6,7 @@ class PersistenceService {
   static const String _keyClubCache = 'cache_clubs_v1';
   static const String _keyTeamCache = 'cache_teams_v1';
   static const String _keyLastResults = 'last_results_v1';
+  static const String _keyMatchReminderIds = 'match_reminder_ids_v1';
 
   static Future<Map<String, dynamic>> loadCache(String key) async {
     final prefs = await SharedPreferences.getInstance();
@@ -39,4 +40,21 @@ class PersistenceService {
       loadCache(_keyLastResults);
   static Future<void> saveLastResults(Map<String, dynamic> data) =>
       saveCache(_keyLastResults, data);
+
+  /// Ids of currently-scheduled match-start reminder notifications, so a
+  /// reschedule can cancel exactly those (not a blanket cancelAll(), which
+  /// would also wipe out the unrelated daily-summary/result notifications).
+  static Future<List<int>> loadMatchReminderIds() async {
+    final prefs = await SharedPreferences.getInstance();
+    final list = prefs.getStringList(_keyMatchReminderIds) ?? [];
+    return list.map(int.parse).toList();
+  }
+
+  static Future<void> saveMatchReminderIds(List<int> ids) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setStringList(
+      _keyMatchReminderIds,
+      ids.map((i) => i.toString()).toList(),
+    );
+  }
 }
